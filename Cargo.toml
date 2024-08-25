@@ -19,8 +19,8 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 # Safety lints
-undocumentated_unsafe_blocks = "deny"
-multiple_unsafe_blocks_per_block = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 # Documentation lints
 missing_safety_doc = "deny"
