@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [ "uefi-stub", "xtask" ]
+
+[workspace.package]
+authors = [ "Jarl Evanson <evanson.jarl@gmail.com>" ]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JarlEvanson/capora-uefi-stub"
+
+[workspace.dependencies]
+
+[workspace.lints.rust]
+# Safety lints
+unsafe_op_in_unsafe_fn = "deny"
+
+# Documentation lints
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Safety lints
+undocumentated_unsafe_blocks = "deny"
+multiple_unsafe_blocks_per_block = "deny"
+
+# Documentation lints
+missing_safety_doc = "deny"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_docs_in_private_items = "warn"
+
+[profile.release]
+overflow-checks = true
