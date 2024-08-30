@@ -1,5 +1,7 @@
 //! Definitions for capora-boot-stub's configuration format.
 
+#![no_std]
+
 /// The major version of the configuration format.
 pub const MAJOR_VERSION: u16 = 0;
 /// The minor version of the configuration format.
