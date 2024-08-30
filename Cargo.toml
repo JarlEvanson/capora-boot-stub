@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "boot-stub", "xtask" ]
+members = [ "boot-stub", "config-raw", "xtask" ]
 
 [workspace.package]
 authors = [ "Jarl Evanson <evanson.jarl@gmail.com>" ]
