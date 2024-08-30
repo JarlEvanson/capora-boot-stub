@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = [ "boot-stub", "config-raw", "xtask" ]
+members = [
+    "boot-stub",
+    "config",
+    "config-raw",
+    "xtask"
+]
 
 [workspace.package]
 authors = [ "Jarl Evanson <evanson.jarl@gmail.com>" ]
@@ -9,6 +14,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/JarlEvanson/capora-uefi-stub"
 
 [workspace.dependencies]
+config-raw = { path = "config-raw" }
 
 [workspace.lints.rust]
 # Safety lints
