@@ -6,8 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "capora-boot-stub-ctl"
+required-features = ["ctl"]
+path = "src/ctl/main.rs"
+
+[features]
+ctl = ["dep:clap"]
+
 [lints]
 workspace = true
 
 [dependencies]
 config-raw.workspace = true
+
+clap = { workspace = true, optional = true }
