@@ -66,15 +66,18 @@ pub fn configure(stub_path: PathBuf, application: ArgumentEntry, modules: Vec<Ar
                     .write_all(embedded_data.as_slice())
                     .unwrap();
                 let data_offset = current_embedded_section_offset;
+                current_embedded_section_offset += embedded_data.len() as u64;
 
                 let current_offset = current_configuration_section_offset;
-                current_embedded_section_offset += embedded_data.len() as u64;
 
                 current_configuration_section_offset +=
                     (mem::size_of::<RawEmbeddedEntry>() + name.len()) as u64;
 
                 configuration_section_file
-                    .write_all(&current_configuration_section_offset.to_le_bytes())
+                    .write_all(
+                        &(mem::size_of::<RawEmbeddedEntry>() as u64 + name.len() as u64)
+                            .to_le_bytes(),
+                    )
                     .unwrap();
                 configuration_section_file
                     .write_all(&EntryType::EMBEDDED.0.to_le_bytes())
