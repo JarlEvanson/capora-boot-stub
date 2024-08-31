@@ -12,7 +12,7 @@ required-features = ["ctl"]
 path = "src/ctl/main.rs"
 
 [features]
-ctl = ["dep:clap"]
+ctl = [ "dep:clap", "dep:tempfile" ]
 
 [lints]
 workspace = true
@@ -21,3 +21,4 @@ workspace = true
 config-raw.workspace = true
 
 clap = { workspace = true, optional = true }
+tempfile = { version = "3.12.0", optional = true }
