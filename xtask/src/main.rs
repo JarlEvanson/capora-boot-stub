@@ -56,7 +56,7 @@ pub fn build(arch: Arch, release: bool) -> Result<PathBuf, BuildError> {
     Ok(binary_location)
 }
 
-/// Various errors that can occur while building capora-boot-stub.
+/// Various errors that can occur while building a cargo application.
 #[derive(Debug)]
 pub enum BuildError {
     /// An error occurred while launching the process.
@@ -93,9 +93,15 @@ pub fn run(
     ovmf_code: PathBuf,
     ovmf_vars: PathBuf,
 ) -> Result<(), RunError> {
-    let stub_path = build(arch, release)?;
+    let stub_path = build(arch, release).map_err(RunError::BuildStubError)?;
     let fat_directory =
         build_fat_directory(arch, stub_path).map_err(RunError::BuildFatDirectoryError)?;
+    let test_application =
+        build_test_application(arch).map_err(RunError::BuildTestApplicationError)?;
+    configure_stub(
+        fat_directory.join("EFI").join("BOOT").join("BOOTX64.EFI"),
+        test_application,
+    )?;
 
     let qemu_name = match arch {
         Arch::X86_64 => "qemu-system-x86_64",
@@ -150,9 +156,13 @@ pub fn run(
 #[derive(Debug)]
 pub enum RunError {
     /// An error occurred while building the kernel.
-    BuildError(BuildError),
+    BuildStubError(BuildError),
     /// An error occurred while building the fat directory.
     BuildFatDirectoryError(std::io::Error),
+    /// An error occurred while building the test application.
+    BuildTestApplicationError(BuildError),
+    /// An error occurred while configuring `capora-boot-stub`.
+    ConfigureError(ConfigureError),
     /// An error ocurred while launching qemu.
     ProcessError(std::io::Error),
     /// QEMU exited with a non-zero exit code.
@@ -162,26 +172,32 @@ pub enum RunError {
     },
 }
 
-impl From<BuildError> for RunError {
-    fn from(value: BuildError) -> Self {
-        Self::BuildError(value)
-    }
-}
-
 impl From<std::io::Error> for RunError {
     fn from(value: std::io::Error) -> Self {
         Self::ProcessError(value)
     }
 }
 
+impl From<ConfigureError> for RunError {
+    fn from(value: ConfigureError) -> Self {
+        Self::ConfigureError(value)
+    }
+}
+
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BuildError(error) => {
+            Self::BuildStubError(error) => {
                 writeln!(f, "error while building capora-boot-stub: {error}")
             }
             Self::BuildFatDirectoryError(error) => {
                 writeln!(f, "error while building FAT directory: {error}")
+            }
+            Self::BuildTestApplicationError(error) => {
+                writeln!(f, "error while building test-application: {error}")
+            }
+            Self::ConfigureError(error) => {
+                writeln!(f, "error while configuring capora-boot-stub: {error}")
             }
             Self::ProcessError(error) => writeln!(f, "error while launching QEMU: {error}"),
             Self::QemuError { code: Some(code) } => {
@@ -212,4 +228,93 @@ pub fn build_fat_directory(arch: Arch, stub_path: PathBuf) -> Result<PathBuf, st
     std::fs::copy(stub_path, boot_directory.join(boot_file_name))?;
 
     Ok(fat_directory)
+}
+
+/// Builds `test-application` for the specified architecture.
+pub fn build_test_application(arch: Arch) -> Result<PathBuf, BuildError> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build");
+    cmd.args(["--package", "test-application"]);
+
+    let target_name = match arch {
+        Arch::X86_64 => "x86_64-unknown-none",
+    };
+    cmd.args(["--target", target_name]);
+
+    let mut binary_location = PathBuf::with_capacity(50);
+    binary_location.push("target");
+    binary_location.push(target_name);
+    binary_location.push("debug");
+    binary_location.push("test-application");
+
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(BuildError::UnsuccessfulBuild {
+            code: status.code(),
+        });
+    }
+
+    Ok(binary_location)
+}
+
+/// Configures `capora-boot-stub` to load the provided application at `test_application_path`.
+pub fn configure_stub(
+    stub_path: PathBuf,
+    test_application_path: PathBuf,
+) -> Result<(), ConfigureError> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("run");
+
+    cmd.args(["--package", "config"]);
+    cmd.args(["--features", "ctl"]);
+
+    cmd.arg("configure");
+
+    cmd.arg("--stub").arg(stub_path);
+
+    cmd.arg("--application").arg(format!(
+        "test-application:embedded:{}",
+        test_application_path.display()
+    ));
+
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(ConfigureError::UnsuccessfulConfiguration {
+            code: status.code(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Various errors that can occur while configuring `capora-boot-stub`.
+#[derive(Debug)]
+pub enum ConfigureError {
+    /// An error occurred while launching the process.
+    ProcessError(std::io::Error),
+    /// The configuration process was unsuccessful.
+    UnsuccessfulConfiguration {
+        /// The exit code of the child process that failed.
+        code: Option<i32>,
+    },
+}
+
+impl From<std::io::Error> for ConfigureError {
+    fn from(value: std::io::Error) -> Self {
+        Self::ProcessError(value)
+    }
+}
+
+impl fmt::Display for ConfigureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProcessError(error) => writeln!(f, "error while launching cargo: {error}"),
+            Self::UnsuccessfulConfiguration { code: Some(code) } => {
+                writeln!(f, "cargo run failed with exit status {code}")
+            }
+            Self::UnsuccessfulConfiguration { code: None } => {
+                f.write_str("cargo terminated by signal")
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ members = [
     "boot-stub",
     "config",
     "config-raw",
+    "test-application",
     "xtask"
 ]
 
