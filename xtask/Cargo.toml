@@ -10,4 +10,4 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-clap = "4.5.16"
+clap.workspace = true

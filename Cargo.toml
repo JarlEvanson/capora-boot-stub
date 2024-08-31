@@ -16,6 +16,8 @@ repository = "https://github.com/JarlEvanson/capora-uefi-stub"
 [workspace.dependencies]
 config-raw = { path = "config-raw" }
 
+clap = "4.5.16"
+
 [workspace.lints.rust]
 # Safety lints
 unsafe_op_in_unsafe_fn = "deny"
