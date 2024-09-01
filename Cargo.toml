@@ -15,6 +15,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/JarlEvanson/capora-uefi-stub"
 
 [workspace.dependencies]
+config = { path = "config" }
 config-raw = { path = "config-raw" }
 
 clap = "4.5.16"

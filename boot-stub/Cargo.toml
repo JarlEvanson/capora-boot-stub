@@ -10,4 +10,5 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+config.workspace = true
 uefi = { git = "https://github.com/rust-osdev/uefi-rs.git" }

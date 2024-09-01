@@ -5,16 +5,24 @@
 
 use core::fmt::Write;
 
+use configuration::parse_and_interprete_configuration;
 use uefi::{
+    boot,
     proto::console::text,
     system::{with_stderr, with_stdout},
     Status,
 };
 
+pub mod configuration;
+
 /// The name of this bootloader.
 const BOOTLOADER_NAME: &str = "capora-boot-stub";
 /// The version of capora-boot-stub.
 const BOOTLOADER_VERSION: &str = core::env!("CARGO_PKG_VERSION");
+
+/// The number of microseconds to stall before returning when an error occurs while UEFI boot
+/// services is still active.
+const STALL_ON_ERROR_TIME: usize = 10_000_000;
 
 #[uefi::entry]
 fn main() -> Status {
@@ -23,6 +31,15 @@ fn main() -> Status {
 
     let _ =
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
+
+    match parse_and_interprete_configuration() {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
+            boot::stall(STALL_ON_ERROR_TIME);
+            return Status::LOAD_ERROR;
+        }
+    }
 
     loop {}
 }
