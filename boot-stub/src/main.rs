@@ -49,7 +49,7 @@ pub fn setup_output(output: &mut text::Output) {
 fn panic_handler(info: &core::panic::PanicInfo) -> ! {
     if uefi::table::system_table_boot().is_some() {
         let _ = with_stderr(|stderr| writeln!(stderr, "{info}"));
-        let _ = with_stdout(|stderr| writeln!(stderr, "{info}"));
+        let _ = with_stdout(|stdout| writeln!(stdout, "{info}"));
     }
 
     loop {
