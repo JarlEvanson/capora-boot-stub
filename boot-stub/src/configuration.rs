@@ -1,6 +1,6 @@
 //! Functionality that deals with parsing and interpreting capora-boot-stub's configuration format.
 
-use core::fmt;
+use core::{error, fmt};
 
 use config::{
     pe::{section_header_table, LocateSectionHeaderTableError, SectionHeaderTable},
@@ -41,12 +41,22 @@ pub fn parse_and_interprete_configuration() -> Result<(), ParseAndInterpretConfi
     todo!()
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// Various errors that can occur while parsing and interpreting [`Configuration`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseAndInterpretConfigurationError {
+    /// An error ocurred while acquiring image data.
     GetImageDataError(GetImageDataError),
+    /// An error ocurred while locating the image's [`SectionHeaderTable`][sht].
+    ///
+    /// [sht]: config::pe::SectionHeaderTable
     LocateSectionHeaderTableError(LocateSectionHeaderTableError),
+    /// The configuration section is missing.
     MissingConfiguration,
+    /// An error occurred while parsing the [`Configuration`].
     ConfigurationError(ParseConfigurationError),
+    /// An [`Configuration`] flag wasn't recognized.
+    UnsupportedConfigurationFlags(u32),
+    /// An entry for the application to be loaded does not exist.
     MissingApplicationEntry,
 }
 
@@ -70,9 +80,24 @@ impl From<ParseConfigurationError> for ParseAndInterpretConfigurationError {
 
 impl fmt::Display for ParseAndInterpretConfigurationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        match self {
+            Self::GetImageDataError(error) => {
+                write!(f, "error retrieving image information: {error}",)
+            }
+            Self::LocateSectionHeaderTableError(error) => {
+                write!(f, "error locating section header table: {error}")
+            }
+            Self::MissingConfiguration => write!(f, "missing configuration section"),
+            Self::ConfigurationError(error) => write!(f, "error parsing configuration: {error:?}"),
+            Self::UnsupportedConfigurationFlags(flags) => {
+                write!(f, "unsupported configuration flags: {:b}", flags)
+            }
+            Self::MissingApplicationEntry => write!(f, "missing entry for application"),
+        }
     }
 }
+
+impl error::Error for ParseAndInterpretConfigurationError {}
 
 /// Returns the base of the loaded image and the size of the image.
 pub fn get_image_data() -> Result<(*const u8, usize), GetImageDataError> {
@@ -86,7 +111,8 @@ pub fn get_image_data() -> Result<(*const u8, usize), GetImageDataError> {
     ))
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// An error occurred while obtaining loaded image image data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetImageDataError(Status);
 
 impl From<uefi::Error> for GetImageDataError {
@@ -94,3 +120,11 @@ impl From<uefi::Error> for GetImageDataError {
         GetImageDataError(value.status())
     }
 }
+
+impl fmt::Display for GetImageDataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "error acquiring `LoadedImage` protocol: {}", self.0)
+    }
+}
+
+impl error::Error for GetImageDataError {}
