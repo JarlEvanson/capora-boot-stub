@@ -44,6 +44,10 @@ fn main() -> Status {
     loop {}
 }
 
+/// Checks if the provided [`Output`] is in mode -1, and if so, searches for the mode with the most
+/// rows and attempts to set `output` to that mode.
+///
+/// Doesn't return errors because booting shouldn't break due to a logging error.
 pub fn setup_output(output: &mut text::Output) {
     let current_mode = output.current_mode();
     match current_mode {
