@@ -2,6 +2,7 @@
 
 #![no_std]
 #![no_main]
+#![feature(maybe_uninit_fill)]
 
 use core::fmt::Write;
 
@@ -33,7 +34,7 @@ fn main() -> Status {
     let _ =
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
 
-    let application = match parse_and_interprete_configuration() {
+    let (application, entries) = match parse_and_interprete_configuration() {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));

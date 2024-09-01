@@ -1,6 +1,11 @@
 //! Functionality that deals with parsing and interpreting capora-boot-stub's configuration format.
 
-use core::{error, fmt, str::Utf8Error};
+use core::{
+    error, fmt,
+    mem::{self, MaybeUninit},
+    ptr,
+    str::Utf8Error,
+};
 
 use config::{
     pe::{section_header_table, LocateSectionHeaderTableError},
@@ -57,7 +62,8 @@ impl fmt::Debug for LoadedEntry {
 
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
-) -> Result<LoadedEntry, ParseAndInterpretConfigurationError> {
+) -> Result<(LoadedEntry, &'static mut [LoadedEntry]), ParseAndInterpretConfigurationError> {
+    // Get base and size of the loaded image.
     let (image_base, image_size) = get_image_data()?;
 
     // SAFETY:
@@ -66,6 +72,7 @@ pub fn parse_and_interprete_configuration(
     let slice = unsafe { core::slice::from_raw_parts(image_base, image_size) };
     let section_header_table = section_header_table(slice)?;
 
+    // Acquire the [`Configuration`].
     let configuration = {
         let section_header = section_header_table
             .find_section(SECTION_NAME)
@@ -78,12 +85,26 @@ pub fn parse_and_interprete_configuration(
         Configuration::parse(config_section)?
     };
 
+    // Check if the [`Configuration`] has any unrecognized flags.
     if configuration.flags().0 & !ConfigurationFlags::SUPPORTED.0 != 0 {
         return Err(
             ParseAndInterpretConfigurationError::UnsupportedConfigurationFlags(
                 configuration.flags().0 & !ConfigurationFlags::SUPPORTED.0,
             ),
         );
+    }
+    // Check if the [`Configuration`] has any unsupported [`Entry`]s.
+    for (index, entry) in configuration.entries().enumerate() {
+        if let Entry::Unknown {
+            entry_type,
+            slice: _,
+        } = entry
+        {
+            return Err(ParseAndInterpretConfigurationError::UnsupportedEntry {
+                index,
+                entry_type,
+            });
+        }
     }
 
     let embedded_section = 'section: {
@@ -112,10 +133,74 @@ pub fn parse_and_interprete_configuration(
 
     let module_count = configuration.entry_count() - 1;
     if module_count == 0 {
-        return Ok(application);
+        return Ok((application, &mut []));
     }
 
-    todo!()
+    let mut total_name_size = 0;
+    for entry in entries.clone() {
+        let length = match entry {
+            Entry::Embedded(embedded) => embedded.name_length(),
+            Entry::BootFilesystem(boot_filesystem) => boot_filesystem.name_length(),
+            _ => unreachable!("unknown entries should have caused an error already"),
+        };
+
+        total_name_size += length as usize;
+    }
+    let total_loaded_entry_size = module_count as usize * mem::size_of::<LoadedEntry>();
+    let total_size = total_loaded_entry_size + total_name_size;
+
+    let ptr = boot::allocate_pool(boot::MemoryType::LOADER_DATA, total_size)
+        .expect("allocation failed")
+        .as_ptr();
+
+    let loaded_entry_slice = {
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                ptr.cast::<MaybeUninit<LoadedEntry>>(),
+                module_count as usize,
+            )
+        };
+        MaybeUninit::fill(
+            slice,
+            LoadedEntry {
+                name: ptr::null(),
+                name_length: 0,
+                address: ptr::null(),
+                size: 0,
+            },
+        )
+    };
+    let string_slice = {
+        let ptr = unsafe { ptr.add(total_loaded_entry_size) };
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                ptr.cast::<core::mem::MaybeUninit<u8>>(),
+                total_name_size,
+            )
+        };
+        MaybeUninit::fill(slice, 0)
+    };
+
+    let mut string_index = 0;
+    for (index, entry) in entries.enumerate() {
+        let (name, base, size) =
+            load_entry(configuration, embedded_section, entry).map_err(|error| {
+                ParseAndInterpretConfigurationError::LoadEntryError { index, error }
+            })?;
+
+        let loaded_entry = LoadedEntry {
+            name: string_slice[string_index..].as_ptr(),
+            name_length: name.len(),
+            address: base,
+            size,
+        };
+        loaded_entry_slice[index] = loaded_entry;
+
+        string_slice[string_index..][..name.len()].copy_from_slice(name.as_bytes());
+        string_index += name.len();
+    }
+
+    Ok((application, loaded_entry_slice))
 }
 
 /// Various errors that can occur while parsing and interpreting [`Configuration`].
@@ -133,10 +218,24 @@ pub enum ParseAndInterpretConfigurationError {
     ConfigurationError(ParseConfigurationError),
     /// An [`Configuration`] flag wasn't recognized.
     UnsupportedConfigurationFlags(u32),
+    /// An [`Entry`] is unsupported.
+    UnsupportedEntry {
+        /// The index of the unsupported [`Entry`].
+        index: usize,
+        /// The type of the unsupported [`Entry`].
+        entry_type: EntryType,
+    },
     /// An entry for the application to be loaded does not exist.
     MissingApplicationEntry,
     /// An error occurrred while loading the application data.
     LoadApplicationError(LoadEntryError),
+    /// An error occurred while loading an entry.
+    LoadEntryError {
+        /// The index of the [`Entry`] whose loading failed.
+        index: usize,
+        /// An error occurred while loading an [`Entry`].
+        error: LoadEntryError,
+    },
 }
 
 impl From<GetImageDataError> for ParseAndInterpretConfigurationError {
@@ -171,8 +270,15 @@ impl fmt::Display for ParseAndInterpretConfigurationError {
             Self::UnsupportedConfigurationFlags(flags) => {
                 write!(f, "unsupported configuration flags: {:b}", flags)
             }
+            Self::UnsupportedEntry { index, entry_type } => write!(
+                f,
+                "entry {index} is of unsupported entry type {entry_type:?}"
+            ),
             Self::MissingApplicationEntry => write!(f, "missing entry for application"),
-            Self::LoadApplicationError(error) => write!(f, "error loading application: {error}",),
+            Self::LoadApplicationError(error) => write!(f, "error loading application: {error}"),
+            Self::LoadEntryError { index, error } => {
+                write!(f, "error loadeding entry {index}: {error}")
+            }
         }
     }
 }
@@ -220,9 +326,9 @@ pub fn load_entry<'config>(
         }
         Entry::BootFilesystem(_) => todo!(),
         Entry::Unknown {
-            entry_type,
+            entry_type: _,
             slice: _,
-        } => Err(LoadEntryError::UnsupportedEntryType(entry_type)),
+        } => unreachable!("unknown entry should have caused an error already"),
     }
 }
 
@@ -242,8 +348,6 @@ pub enum LoadEntryError {
     ///
     /// [ee]: config::EmbeddedEntry
     Embedded(LoadEmbeddedEntryError),
-    /// An unsupported entry type was encountered.
-    UnsupportedEntryType(EntryType),
 }
 
 impl From<GetNameError> for LoadEntryError {
@@ -267,9 +371,6 @@ impl fmt::Display for LoadEntryError {
             ),
             Self::NameError(error) => write!(f, "failed to get name: {error}"),
             Self::Embedded(error) => write!(f, "error while parsing embedded entry: {error}"),
-            Self::UnsupportedEntryType(entry_type) => {
-                write!(f, "entry type {} is unsupported", entry_type.0)
-            }
         }
     }
 }
@@ -311,7 +412,7 @@ pub fn get_name<'config>(
         Entry::Unknown {
             entry_type: _,
             slice: _,
-        } => unreachable!("this should never to reached"),
+        } => unreachable!("this should never be reached"),
     };
 
     let name_max = offset.checked_add(length);
