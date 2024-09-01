@@ -14,6 +14,7 @@ use uefi::{
 };
 
 pub mod configuration;
+pub mod mapper;
 
 /// The name of this bootloader.
 const BOOTLOADER_NAME: &str = "capora-boot-stub";
