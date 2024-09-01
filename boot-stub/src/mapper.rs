@@ -187,6 +187,23 @@ impl VirtualMemoryMapEntry {
         self.size_flags & Self::EXEC_MASK == Self::EXEC_MASK
     }
 
+    /// The [`PageRange`] that represents the virtual address range this [`VirtualMemoryMapEntry`]
+    /// covers.
+    pub fn page_range(self) -> PageRange {
+        PageRange {
+            page_number: self.page(),
+            size: self.size(),
+        }
+    }
+
+    /// The [`FrameRange`] that underlies the virtual address range.
+    pub fn frame_range(self) -> FrameRange {
+        FrameRange {
+            frame_number: self.frame(),
+            size: self.size(),
+        }
+    }
+
     /// Tests whether `self` and `entry` specify overlapping ranges.
     pub fn virt_overlaps(&self, entry: VirtualMemoryMapEntry) -> bool {
         self.page() < entry.page() + entry.size() && entry.page() < self.page() + self.size()
