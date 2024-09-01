@@ -117,6 +117,7 @@ pub fn run(
         Arch::X86_64 => {
             // Use a fairly modern machine to target.
             cmd.args(["-machine", "q35"]);
+            cmd.args(["-cpu", "host,rdrand=on"]);
 
             // Allocate some memory.
             cmd.args(["-m", "256M"]);
