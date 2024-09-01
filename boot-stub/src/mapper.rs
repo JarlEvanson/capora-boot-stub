@@ -58,6 +58,14 @@ impl VirtualMemoryMap {
         Some(())
     }
 
+    /// Returns the [`VirtualMemoryMapEntry`] that contains `address`, if there exists such an
+    /// entry in this [`VirtualMemoryMap`].
+    pub fn lookup(&self, address: u64) -> Option<&VirtualMemoryMapEntry> {
+        self.as_slice()
+            .iter()
+            .find(|entry| entry.virt_contains(address))
+    }
+
     fn grow(&mut self) {
         let new_capacity = if self.map_capacity == 0 {
             4
@@ -182,6 +190,13 @@ impl VirtualMemoryMapEntry {
     /// Tests whether `self` and `entry` specify overlapping ranges.
     pub fn virt_overlaps(&self, entry: VirtualMemoryMapEntry) -> bool {
         self.page() < entry.page() + entry.size() && entry.page() < self.page() + self.size()
+    }
+
+    /// Tests whether `address` is contained in the virtual range of this
+    /// [`VirtualMemoryMapEntry`].
+    pub fn virt_contains(&self, address: u64) -> bool {
+        let containing_page = (address / 4096) & PageRange::PAGE_MASK;
+        self.page() <= containing_page && containing_page < self.page() + self.size()
     }
 }
 
