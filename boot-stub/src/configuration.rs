@@ -1,18 +1,21 @@
 //! Functionality that deals with parsing and interpreting capora-boot-stub's configuration format.
 
-use core::{error, fmt};
+use core::{error, fmt, str::Utf8Error};
 
 use config::{
-    pe::{section_header_table, LocateSectionHeaderTableError, SectionHeaderTable},
-    Configuration, ParseConfigurationError,
+    pe::{section_header_table, LocateSectionHeaderTableError},
+    Configuration, ConfigurationFlags, Entry, EntryType, ParseConfigurationError,
+    EMBEDDED_SECTION_NAME, SECTION_NAME,
 };
 use uefi::{
-    boot::{image_handle, open_protocol_exclusive},
+    boot::{self, image_handle, open_protocol_exclusive},
     proto::loaded_image::LoadedImage,
     Status,
 };
 
-pub fn parse_and_interprete_configuration() -> Result<(), ParseAndInterpretConfigurationError> {
+/// Acquires, parses, and interprets the [`Configuration`].
+pub fn parse_and_interprete_configuration(
+) -> Result<(&'static str, *mut u8, usize), ParseAndInterpretConfigurationError> {
     let (image_base, image_size) = get_image_data()?;
 
     // SAFETY:
@@ -23,7 +26,7 @@ pub fn parse_and_interprete_configuration() -> Result<(), ParseAndInterpretConfi
 
     let configuration = {
         let section_header = section_header_table
-            .find_section(".options")
+            .find_section(SECTION_NAME)
             .ok_or(ParseAndInterpretConfigurationError::MissingConfiguration)?;
         let config_section_base =
             unsafe { image_base.add(section_header.virtual_address as usize) };
@@ -33,10 +36,36 @@ pub fn parse_and_interprete_configuration() -> Result<(), ParseAndInterpretConfi
         Configuration::parse(config_section)?
     };
 
+    if configuration.flags().0 & !ConfigurationFlags::SUPPORTED.0 != 0 {
+        return Err(
+            ParseAndInterpretConfigurationError::UnsupportedConfigurationFlags(
+                configuration.flags().0 & !ConfigurationFlags::SUPPORTED.0,
+            ),
+        );
+    }
+
+    let embedded_section = 'section: {
+        let Some(section_header) = section_header_table.find_section(EMBEDDED_SECTION_NAME) else {
+            break 'section None;
+        };
+        let section_base = unsafe { image_base.add(section_header.virtual_address as usize) };
+        let section = unsafe {
+            core::slice::from_raw_parts(section_base, section_header.virtual_size as usize)
+        };
+        Some(section)
+    };
+
     let mut entries = configuration.entries();
     let application_entry = entries
         .next()
         .ok_or(ParseAndInterpretConfigurationError::MissingApplicationEntry)?;
+    let application = load_entry(configuration, embedded_section, application_entry)
+        .map_err(ParseAndInterpretConfigurationError::LoadApplicationError)?;
+
+    let module_count = configuration.entry_count() - 1;
+    if module_count == 0 {
+        return Ok((application.0, application.1, application.2));
+    }
 
     todo!()
 }
@@ -58,6 +87,8 @@ pub enum ParseAndInterpretConfigurationError {
     UnsupportedConfigurationFlags(u32),
     /// An entry for the application to be loaded does not exist.
     MissingApplicationEntry,
+    /// An error occurrred while loading the application data.
+    LoadApplicationError(LoadEntryError),
 }
 
 impl From<GetImageDataError> for ParseAndInterpretConfigurationError {
@@ -93,11 +124,176 @@ impl fmt::Display for ParseAndInterpretConfigurationError {
                 write!(f, "unsupported configuration flags: {:b}", flags)
             }
             Self::MissingApplicationEntry => write!(f, "missing entry for application"),
+            Self::LoadApplicationError(error) => write!(f, "error loading application: {error}",),
         }
     }
 }
 
 impl error::Error for ParseAndInterpretConfigurationError {}
+
+/// Loads the data referenced by the provided [`Entry`].
+pub fn load_entry<'config>(
+    configuration: Configuration<'config>,
+    embedded_section: Option<&'static [u8]>,
+    target_entry: Entry<'config>,
+) -> Result<(&'config str, *mut u8, usize), LoadEntryError> {
+    match target_entry {
+        Entry::Embedded(entry) => {
+            let name = get_name(configuration, target_entry)?;
+            let Some(embedded_section) = embedded_section else {
+                return Err(LoadEmbeddedEntryError::MissingEmbeddedSection.into());
+            };
+
+            let page_count = entry.data_length().div_ceil(4096) as usize;
+            let pages = boot::allocate_pages(
+                boot::AllocateType::AnyPages,
+                boot::MemoryType::LOADER_DATA,
+                page_count,
+            );
+            let pages = pages.map_err(|error| LoadEntryError::AllocationFailed {
+                page_count,
+                status: error.status(),
+            })?;
+
+            let name_max = entry.data_offset().checked_add(entry.data_length());
+            if !name_max.is_some_and(|value| value as usize <= embedded_section.len()) {
+                return Err(LoadEmbeddedEntryError::DataOutOfBounds.into());
+            }
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    embedded_section[entry.data_offset() as usize..].as_ptr(),
+                    pages.as_ptr(),
+                    entry.data_length() as usize,
+                )
+            }
+
+            Ok((name, pages.as_ptr(), entry.data_length() as usize))
+        }
+        Entry::BootFilesystem(_) => todo!(),
+        Entry::Unknown {
+            entry_type,
+            slice: _,
+        } => Err(LoadEntryError::UnsupportedEntryType(entry_type)),
+    }
+}
+
+/// Various errors that can occur while loading an [`Entry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadEntryError {
+    /// An allocation failed.
+    AllocationFailed {
+        /// The number of pages the failing allocation attempted to allocate.
+        page_count: usize,
+        /// The [`Status`] that the allocation returned.
+        status: Status,
+    },
+    /// An error ocurred when getting the name of the [`Entry`].
+    NameError(GetNameError),
+    /// An error ocurred while loading an [`EmbeddedEntry`][ee].
+    ///
+    /// [ee]: config::EmbeddedEntry
+    Embedded(LoadEmbeddedEntryError),
+    /// An unsupported entry type was encountered.
+    UnsupportedEntryType(EntryType),
+}
+
+impl From<GetNameError> for LoadEntryError {
+    fn from(value: GetNameError) -> Self {
+        Self::NameError(value)
+    }
+}
+
+impl From<LoadEmbeddedEntryError> for LoadEntryError {
+    fn from(value: LoadEmbeddedEntryError) -> Self {
+        Self::Embedded(value)
+    }
+}
+
+impl fmt::Display for LoadEntryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationFailed { page_count, status } => write!(
+                f,
+                "failed to allocate memory chunk of {page_count} pages: {status}"
+            ),
+            Self::NameError(error) => write!(f, "failed to get name: {error}"),
+            Self::Embedded(error) => write!(f, "error while parsing embedded entry: {error}"),
+            Self::UnsupportedEntryType(entry_type) => {
+                write!(f, "entry type {} is unsupported", entry_type.0)
+            }
+        }
+    }
+}
+
+impl error::Error for LoadEntryError {}
+
+/// Various errors that can occur
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadEmbeddedEntryError {
+    /// `capora-boot-stub` is missing an embedded section when an [`EmbeddedEntry`][ee] exists.
+    ///
+    /// [ee]: config::EmbeddedEntry
+    MissingEmbeddedSection,
+    /// The data referenced by the [`EmbeddedEntry`][ee] is located out of bounds.
+    ///
+    /// [ee]: config::EmbeddedEntry
+    DataOutOfBounds,
+}
+
+impl fmt::Display for LoadEmbeddedEntryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingEmbeddedSection => f.write_str("embedded data section is missing"),
+            Self::DataOutOfBounds => f.write_str("data is located out of bounds"),
+        }
+    }
+}
+
+impl error::Error for LoadEmbeddedEntryError {}
+
+/// Retrives the name of the entry, checking for validity.
+pub fn get_name<'config>(
+    configuration: Configuration<'config>,
+    entry: Entry<'config>,
+) -> Result<&'config str, GetNameError> {
+    let (offset, length) = match entry {
+        Entry::Embedded(entry) => (entry.name_offset(), entry.name_length()),
+        Entry::BootFilesystem(entry) => (entry.name_offset(), entry.name_length()),
+        Entry::Unknown {
+            entry_type: _,
+            slice: _,
+        } => unreachable!("this should never to reached"),
+    };
+
+    let name_max = offset.checked_add(length);
+    if !name_max.is_some_and(|value| value as usize <= configuration.underlying_slice().len()) {
+        return Err(GetNameError::NameOutOfBounds);
+    }
+
+    core::str::from_utf8(&configuration.underlying_slice()[offset as usize..])
+        .map_err(GetNameError::Utf8Error)
+}
+
+/// Various errors that can occur while getting the name of an [`Entry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GetNameError {
+    /// The name is located out of bounds.
+    NameOutOfBounds,
+    /// The name failed to be parses as utf8.
+    Utf8Error(Utf8Error),
+}
+
+impl fmt::Display for GetNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NameOutOfBounds => f.write_str("name located out of bounds"),
+            Self::Utf8Error(error) => write!(f, "name parsing error: {error}"),
+        }
+    }
+}
+
+impl error::Error for GetNameError {}
 
 /// Returns the base of the loaded image and the size of the image.
 pub fn get_image_data() -> Result<(*const u8, usize), GetImageDataError> {
