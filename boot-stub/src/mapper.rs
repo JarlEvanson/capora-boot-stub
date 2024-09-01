@@ -2,7 +2,7 @@
 
 use core::{
     fmt,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     ptr::{self, NonNull},
 };
 
@@ -73,10 +73,13 @@ impl VirtualMemoryMap {
             self.map_capacity * 2
         };
 
-        let new_ptr = uefi::boot::allocate_pool(uefi::boot::MemoryType::LOADER_DATA, new_capacity)
-            .expect("allocation failed")
-            .as_ptr()
-            .cast::<VirtualMemoryMapEntry>();
+        let new_ptr = uefi::boot::allocate_pool(
+            uefi::boot::MemoryType::LOADER_DATA,
+            new_capacity * mem::size_of::<VirtualMemoryMapEntry>(),
+        )
+        .expect("allocation failed")
+        .as_ptr()
+        .cast::<VirtualMemoryMapEntry>();
 
         if let Some(old_ptr) = NonNull::new(self.map_ptr) {
             unsafe { core::ptr::copy_nonoverlapping(self.map_ptr, new_ptr, self.map_length) }
