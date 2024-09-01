@@ -45,6 +45,11 @@ pub struct ConfigurationHeader {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct ConfigurationFlags(pub u32);
 
+impl ConfigurationFlags {
+    /// The bitmask of all flags known by this crate.
+    pub const SUPPORTED: Self = Self(0);
+}
+
 /// The header for all entries.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -93,6 +98,11 @@ pub struct EmbeddedEntry {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct EmbeddedEntryFlags(pub u32);
 
+impl EmbeddedEntryFlags {
+    /// The bitmask of all flags known by this crate.
+    pub const SUPPORTED: Self = Self(0);
+}
+
 /// Entry representing data to be loaded from the boot filesystem.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -118,3 +128,8 @@ pub struct BootFilesystemEntry {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct BootFilesystemEntryFlags(pub u32);
+
+impl BootFilesystemEntryFlags {
+    /// The bitmask of all flags known by this crate.
+    pub const SUPPORTED: Self = Self(0);
+}
