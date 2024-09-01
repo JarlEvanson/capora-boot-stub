@@ -5,9 +5,13 @@
 use core::{fmt, mem};
 
 use config_raw::{
-    BootFilesystemEntry as RawBootFilesystemEntry, BootFilesystemEntryFlags, ConfigurationFlags,
-    ConfigurationHeader, EmbeddedEntry as RawEmbeddedEntry, EmbeddedEntryFlags, EntryBase,
-    EntryType, VersionHeader as RawVersionHeader, MAJOR_VERSION,
+    BootFilesystemEntry as RawBootFilesystemEntry, ConfigurationHeader,
+    EmbeddedEntry as RawEmbeddedEntry, EntryBase, VersionHeader as RawVersionHeader,
+};
+
+pub use config_raw::{
+    BootFilesystemEntryFlags, ConfigurationFlags, EmbeddedEntryFlags, EntryType,
+    EMBEDDED_SECTION_NAME, MAJOR_VERSION, MINOR_VERSION, SECTION_NAME,
 };
 
 pub mod pe;
@@ -117,6 +121,11 @@ impl<'slice> Configuration<'slice> {
             next_offset: self.entry_offset(),
             remaining: self.entry_count(),
         }
+    }
+
+    /// Returns the underlying slice.
+    pub fn underlying_slice(&self) -> &'slice [u8] {
+        self.slice
     }
 
     fn entry_offset(&self) -> u64 {
