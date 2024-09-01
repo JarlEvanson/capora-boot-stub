@@ -13,9 +13,51 @@ use uefi::{
     Status,
 };
 
+/// A loaded [`Entry`].
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LoadedEntry {
+    /// A pointer to the utf8 encoded name of the loaded [`Entry`].
+    name: *const u8,
+    /// The length, in bytes, of [`LoadedEntry::name`].
+    name_length: usize,
+    /// The address of the loaded [`Entry`].
+    address: *const u8,
+    /// The size, in bytes, of the loaded [`Entry`].
+    size: usize,
+}
+
+impl LoadedEntry {
+    /// The name of the [`LoadedEntry`].
+    pub fn name(&self) -> &str {
+        let name_slice = unsafe { core::slice::from_raw_parts(self.name, self.name_length) };
+        unsafe { core::str::from_utf8_unchecked(name_slice) }
+    }
+
+    /// A slice of the bytes this [`LoadedEntry`] controls.
+    pub fn data(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.address, self.size) }
+    }
+
+    /// A mutable slice of the bytes this [`LoadedEntry`] controls.
+    pub fn data_mut(&mut self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.address.cast_mut(), self.size) }
+    }
+}
+
+impl fmt::Debug for LoadedEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("LoadedEntry");
+
+        debug_struct.field("name", &self.name());
+        debug_struct.field("data", &self.data());
+
+        debug_struct.finish()
+    }
+}
+
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
-) -> Result<(&'static str, *mut u8, usize), ParseAndInterpretConfigurationError> {
+) -> Result<LoadedEntry, ParseAndInterpretConfigurationError> {
     let (image_base, image_size) = get_image_data()?;
 
     // SAFETY:
@@ -61,10 +103,16 @@ pub fn parse_and_interprete_configuration(
         .ok_or(ParseAndInterpretConfigurationError::MissingApplicationEntry)?;
     let application = load_entry(configuration, embedded_section, application_entry)
         .map_err(ParseAndInterpretConfigurationError::LoadApplicationError)?;
+    let application = LoadedEntry {
+        name: application.0.as_ptr(),
+        name_length: application.0.len(),
+        address: application.1,
+        size: application.2,
+    };
 
     let module_count = configuration.entry_count() - 1;
     if module_count == 0 {
-        return Ok((application.0, application.1, application.2));
+        return Ok(application);
     }
 
     todo!()

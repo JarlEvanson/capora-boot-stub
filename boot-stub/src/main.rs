@@ -32,7 +32,7 @@ fn main() -> Status {
     let _ =
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
 
-    let result = match parse_and_interprete_configuration() {
+    let application = match parse_and_interprete_configuration() {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -40,14 +40,6 @@ fn main() -> Status {
             return Status::LOAD_ERROR;
         }
     };
-    let (application_name, application_base, application_size) = result;
-    let _ = with_stdout(|stdout| {
-        writeln!(
-            stdout,
-            "{} {:p} {}",
-            application_name, application_base, application_size
-        )
-    });
 
     loop {}
 }
