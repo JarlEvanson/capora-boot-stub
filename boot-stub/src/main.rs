@@ -5,7 +5,11 @@
 #![feature(maybe_uninit_fill)]
 #![feature(array_chunks)]
 
-use core::fmt::Write;
+use core::{
+    arch::x86_64,
+    error,
+    fmt::{self, Write},
+};
 
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
@@ -68,6 +72,18 @@ fn main() -> Status {
         }
     };
 
+    if let Err(error) = test_required_bit_support() {
+        let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
+        let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+        boot::stall(STALL_ON_ERROR_TIME);
+        return Status::LOAD_ERROR;
+    }
+
+    let mmeory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
+
+    // Already checked that the required bits are supported.
+    let _ = set_required_bits();
+
     loop {}
 }
 
@@ -93,6 +109,55 @@ pub fn setup_output(output: &mut text::Output) {
         Ok(Some(_)) | Err(_) => {}
     }
 }
+
+/// Checks if the required feature bits are supported.
+pub fn test_required_bit_support() -> Result<(), UnsupportedFeaturesError> {
+    let nxe_supported_bit = unsafe { x86_64::__cpuid(0x80000001).edx };
+    if !((nxe_supported_bit & (1 << 20)) == (1 << 20)) {
+        return Err(UnsupportedFeaturesError::NoExecuteEnable);
+    }
+
+    Ok(())
+}
+
+/// Sets bits required by the boot specification.
+pub fn set_required_bits() -> Result<(), UnsupportedFeaturesError> {
+    test_required_bit_support()?;
+
+    unsafe {
+        core::arch::asm!(
+            "mov ecx, 0xC0000080",
+            "rdmsr",
+            "or eax, 0x400",
+            "wrmsr",
+
+            // Enable write protection
+            "mov rax, cr0",
+            "or rax, 0x10000",
+            "mov cr0, rax",
+            out("eax") _,
+        )
+    }
+
+    Ok(())
+}
+
+/// Various unsupported features.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedFeaturesError {
+    /// The no-execute enable feature is not supported by this processor.
+    NoExecuteEnable,
+}
+
+impl fmt::Display for UnsupportedFeaturesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoExecuteEnable => f.write_str("no execute enable bit is not supported"),
+        }
+    }
+}
+
+impl error::Error for UnsupportedFeaturesError {}
 
 #[cfg_attr(not(test), panic_handler)]
 #[cfg_attr(test, expect(dead_code))]
