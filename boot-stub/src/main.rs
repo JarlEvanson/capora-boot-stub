@@ -8,7 +8,7 @@
 use core::fmt::Write;
 
 use configuration::parse_and_interprete_configuration;
-use loader::load_application;
+use load_application::load_application;
 use mapper::VirtualMemoryMap;
 use uefi::{
     boot,
@@ -18,7 +18,7 @@ use uefi::{
 };
 
 pub mod configuration;
-pub mod loader;
+pub mod load_application;
 pub mod mapper;
 pub mod paging;
 
