@@ -126,3 +126,23 @@ fn get_pml3e_page_index(page: u64) -> u16 {
 fn get_pml4e_page_index(page: u64) -> u16 {
     ((page >> 27) & 0x1FF) as u16
 }
+
+/// Gets the index into the page map level 1 table.
+pub fn get_pml1e_index(address: u64) -> u16 {
+    ((address >> 12) & 0x1FF) as u16
+}
+
+/// Gets the index into the page map level 2 table.
+pub fn get_pml2e_index(address: u64) -> u16 {
+    ((address >> 21) & 0x1FF) as u16
+}
+
+/// Gets the index into the page map level 3 table.
+pub fn get_pml3e_index(address: u64) -> u16 {
+    ((address >> 30) & 0x1FF) as u16
+}
+
+/// Gets the index into the page map level 4 table.
+pub fn get_pml4e_index(address: u64) -> u16 {
+    ((address >> 39) & 0x1FF) as u16
+}
