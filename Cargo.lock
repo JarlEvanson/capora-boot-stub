@@ -68,6 +68,7 @@ name = "boot-stub"
 version = "0.1.0"
 dependencies = [
  "config",
+ "elf",
  "uefi",
 ]
 
@@ -122,6 +123,11 @@ dependencies = [
 [[package]]
 name = "config-raw"
 version = "0.1.0"
+
+[[package]]
+name = "elf"
+version = "0.1.0"
+source = "git+https://github.com/JarlEvanson/capora-elf.git#990466d1fb7013644e182b6aa8d3ec6b20a71001"
 
 [[package]]
 name = "errno"

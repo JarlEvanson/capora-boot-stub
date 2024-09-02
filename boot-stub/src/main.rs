@@ -8,6 +8,8 @@
 use core::fmt::Write;
 
 use configuration::parse_and_interprete_configuration;
+use loader::load_application;
+use mapper::VirtualMemoryMap;
 use uefi::{
     boot,
     proto::console::text,
@@ -16,6 +18,7 @@ use uefi::{
 };
 
 pub mod configuration;
+pub mod loader;
 pub mod mapper;
 pub mod paging;
 
@@ -27,6 +30,14 @@ const BOOTLOADER_VERSION: &str = core::env!("CARGO_PKG_VERSION");
 /// The number of microseconds to stall before returning when an error occurs while UEFI boot
 /// services is still active.
 const STALL_ON_ERROR_TIME: usize = 10_000_000;
+
+/// The minimum address of the application base.
+const MINIMUM_APPLICATION_BASE: u64 = 0xFFFFFFFF80000000;
+/// The size of the region that the application can occupy.
+const APPLICATION_REGION_SIZE: u64 = 0x0000000080000000;
+
+/// The maximum number of retries for finding a elf base before giving up.
+const BASE_RETRY_COUNT: u64 = 1000;
 
 #[uefi::entry]
 fn main() -> Status {
@@ -40,6 +51,18 @@ fn main() -> Status {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
+            let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+            boot::stall(STALL_ON_ERROR_TIME);
+            return Status::LOAD_ERROR;
+        }
+    };
+
+    let mut virtual_map = VirtualMemoryMap::new();
+    let (slide, entry_point) = match load_application(&mut virtual_map, application.data()) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
+            let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
             boot::stall(STALL_ON_ERROR_TIME);
             return Status::LOAD_ERROR;
         }

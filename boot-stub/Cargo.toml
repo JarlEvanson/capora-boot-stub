@@ -11,4 +11,5 @@ workspace = true
 
 [dependencies]
 config.workspace = true
+elf = { git = "https://github.com/JarlEvanson/capora-elf.git" }
 uefi = { git = "https://github.com/rust-osdev/uefi-rs.git" }
