@@ -91,7 +91,8 @@ impl VirtualMemoryMap {
         self.map_capacity = new_capacity;
     }
 
-    fn as_slice(&self) -> &[VirtualMemoryMapEntry] {
+    /// Returns a slice of the [`VirtualMemoryMapEntry`] that compose this [`VirtualMemoryMap`].
+    pub fn as_slice(&self) -> &[VirtualMemoryMapEntry] {
         if self.map_capacity == 0 {
             return &[];
         }

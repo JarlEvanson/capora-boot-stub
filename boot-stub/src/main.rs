@@ -3,6 +3,7 @@
 #![no_std]
 #![no_main]
 #![feature(maybe_uninit_fill)]
+#![feature(array_chunks)]
 
 use core::fmt::Write;
 
@@ -16,6 +17,7 @@ use uefi::{
 
 pub mod configuration;
 pub mod mapper;
+pub mod paging;
 
 /// The name of this bootloader.
 const BOOTLOADER_NAME: &str = "capora-boot-stub";
