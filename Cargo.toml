@@ -18,6 +18,8 @@ repository = "https://github.com/JarlEvanson/capora-uefi-stub"
 config = { path = "config" }
 config-raw = { path = "config-raw" }
 
+boot-api = { git = "https://github.com/JarlEvanson/capora-boot-api.git" }
+
 clap = "4.5.16"
 
 [workspace.lints.rust]
