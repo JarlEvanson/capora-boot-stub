@@ -43,7 +43,7 @@ const APPLICATION_REGION_SIZE: u64 = 0x0000000080000000;
 
 /// The maximum number of retries for finding a elf base before giving up.
 const BASE_RETRY_COUNT: u64 = 1000;
-
+/// The size of the stack for the loaded application.
 const LOADED_STACK_SIZE: u64 = 64 * 1024;
 
 #[uefi::entry]
