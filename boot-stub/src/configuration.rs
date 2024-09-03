@@ -65,6 +65,10 @@ pub fn parse_and_interprete_configuration(
 ) -> Result<(LoadedEntry, &'static mut [LoadedEntry]), ParseAndInterpretConfigurationError> {
     // Get base and size of the loaded image.
     let (image_base, image_size) = get_image_data()?;
+    use core::fmt::Write;
+    let _ = uefi::system::with_stdout(|stdout| {
+        writeln!(stdout, "capora-boot-stub loaded at {image_base:p}")
+    });
 
     // SAFETY:
     // We create and drop this slice as quickly as possible, and we don't interact with any

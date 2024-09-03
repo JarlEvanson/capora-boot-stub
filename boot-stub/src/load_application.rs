@@ -71,6 +71,7 @@ pub fn load_application(
         }
         elf_type => return Err(LoadApplicationError::UnsupportedElfType(elf_type)),
     };
+    let _ = with_stdout(|stdout| writeln!(stdout, "Application Load Address: {slide:X}"));
 
     for header in program_header_table.iter() {
         match header.segment_type() {
@@ -104,6 +105,14 @@ pub fn load_application(
                         .expect("mismatched page and frame range sizes"),
                     )
                     .ok_or(LoadApplicationError::OverlappingLoadSegments)?;
+                let _ = with_stdout(|stdout| {
+                    writeln!(
+                        stdout,
+                        "Segment loaded for {:X} at frame {:X}",
+                        page_range.page(),
+                        frame_range.frame(),
+                    )
+                });
 
                 unsafe { core::ptr::write_bytes(frames.as_ptr(), 0, page_count as usize * 4096) }
 
