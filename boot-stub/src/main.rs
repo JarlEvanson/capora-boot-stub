@@ -65,7 +65,7 @@ fn main() -> Status {
     };
 
     let mut virtual_map = VirtualMemoryMap::new();
-    let (slide, entry_point) = match load_application(&mut virtual_map, application.data()) {
+    let entry_point = match load_application(&mut virtual_map, application.data()) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -74,6 +74,18 @@ fn main() -> Status {
             return Status::LOAD_ERROR;
         }
     };
+    for entry in entries {
+        generate_random_supervisor_base(
+            &mut virtual_map,
+            FrameRange::new(
+                (entry.data().as_ptr() as u64) >> 12,
+                (entry.data().len() as u64) / 4096,
+            )
+            .unwrap(),
+            true,
+            false,
+        );
+    }
 
     if let Err(error) = test_required_bit_support() {
         let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
