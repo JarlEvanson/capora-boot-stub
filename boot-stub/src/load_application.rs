@@ -195,7 +195,7 @@ pub fn load_application(
                     let frame_range_offset = address - memory_range.page_range().virtual_address();
                     assert!(frame_range_offset + 8 <= memory_range.size() * 4096);
 
-                    let address = memory_range.frame_range().frame() + frame_range_offset;
+                    let address = (memory_range.frame_range().frame() << 12) + frame_range_offset;
                     unsafe { (address as *mut u64).write_unaligned(value) }
                 }
                 relocation_type => {
