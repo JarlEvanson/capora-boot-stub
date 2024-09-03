@@ -37,6 +37,6 @@ SECTIONS {
     } :dynamic
 
     .bootloader_request : {
-        *(.bootloader_request)
+        KEEP(*(.bootloader_request))
     } :boot_request
 }

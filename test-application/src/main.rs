@@ -19,9 +19,6 @@ static mut K: u8 = 0;
 /// The entry point of the test application.
 #[export_name = "_start"]
 pub fn entry() -> ! {
-    // Reference it to force the item to be kept.
-    core::hint::black_box(core::ptr::addr_of!(BOOTLOADER_REQUEST));
-
     unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(K), 2) }
 
     loop {}
