@@ -204,9 +204,21 @@ pub fn load_application(
         let rela_size = rela_size.ok_or(LoadApplicationError::MissingRelaSize)?;
         let rela_entry_size = rela_ent.ok_or(LoadApplicationError::MissingRelaEntrySize)?;
 
+        let memory_range = virtual_map
+            .lookup(slide + rela_offset)
+            .expect("rela table not loaded");
+        let loaded_range = unsafe {
+            core::slice::from_raw_parts(
+                (memory_range.frame() << 12) as *const u8,
+                memory_range.size() as usize * 4096,
+            )
+        };
+        let range_offset = (slide + rela_offset) - memory_range.page_range().virtual_address();
+        let rela_slice = &loaded_range[range_offset as usize..];
+
         let num_entries = rela_size / rela_entry_size;
         for index in 0..num_entries {
-            let rela = &slice[(rela_offset + index * rela_entry_size) as usize..];
+            let rela = &rela_slice[(index * rela_entry_size) as usize..];
             let offset = u64::from_le_bytes(*rela.first_chunk::<8>().unwrap());
             let info = u64::from_le_bytes(*rela[8..].first_chunk::<8>().unwrap());
             let addend = i64::from_le_bytes(*rela[16..].first_chunk::<8>().unwrap());
