@@ -9,7 +9,7 @@ use core::{
     arch::x86_64,
     error,
     fmt::{self, Write},
-    mem,
+    mem::{self, MaybeUninit},
 };
 
 use configuration::parse_and_interprete_configuration;
@@ -166,6 +166,46 @@ impl fmt::Display for UnsupportedFeaturesError {
         match self {
             Self::NoExecuteEnable => f.write_str("no execute enable bit is not supported"),
         }
+    }
+}
+
+/// Loads the GDT mapped at `gdt`.
+///
+/// This GDT should have a kernel code segment mapped at offset 0x8, and a kernel data segment
+/// mapped at 0x10.
+#[inline(always)]
+pub fn load_gdt(gdt: u64) {
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct Gdtr {
+        other: [MaybeUninit<u8>; 6],
+        size: u16,
+        offset: u64,
+    }
+
+    let gdtr = Gdtr {
+        other: [MaybeUninit::uninit(); 6],
+        size: (mem::size_of_val(&GDT) - 1) as u16,
+        offset: gdt,
+    };
+
+    unsafe {
+        core::arch::asm!(
+            "lgdt [rax]",
+            "push 0x08",
+            "lea rax, [rip + 5f]",
+            "push rax",
+            "retfq",
+            "5:",
+            "mov ax, 0x10",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov es, ax",
+            "mov fs, ax",
+            "mov gs, ax",
+            "mov ss, ax",
+            inout("rax") &gdtr.size => _,
+        )
     }
 }
 
