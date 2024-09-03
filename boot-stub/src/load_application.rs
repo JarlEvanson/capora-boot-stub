@@ -5,6 +5,7 @@ use core::{
     mem,
 };
 
+use boot_api::BootloaderRequest;
 use elf::{
     class::Class64,
     encoding::LittleEndian,
@@ -73,7 +74,10 @@ pub fn load_application(
     };
     let _ = with_stdout(|stdout| writeln!(stdout, "Application Load Address: {slide:X}"));
 
+    let mut request_found = false;
     for header in program_header_table.iter() {
+        const BOOTLOADER_REQUEST_SEGMENT_TYPE: SegmentType =
+            SegmentType(boot_api::BOOTLOADER_REQUEST_ELF_SEGMENT);
         match header.segment_type() {
             SegmentType::LOAD => {
                 let page_containing = header.virtual_address() / 4096;
@@ -127,6 +131,26 @@ pub fn load_application(
 
                 copy_to.copy_from_slice(copy_from);
             }
+            BOOTLOADER_REQUEST_SEGMENT_TYPE => {
+                let request = &slice[header.file_offset() as usize
+                    ..(header.file_offset() + header.file_size()) as usize];
+                if !(request.len() <= mem::size_of::<BootloaderRequest>()) {
+                    return Err(LoadApplicationError::UnuspportedApplicationRequest);
+                }
+
+                let mut array_chunks = request.array_chunks::<{ mem::size_of::<u64>() }>();
+                if !((&mut array_chunks)
+                    .take(3)
+                    .zip(boot_api::SIGNATURE)
+                    .all(|(a, b)| *a == b.to_ne_bytes()))
+                {
+                    return Err(LoadApplicationError::UnuspportedApplicationRequest);
+                }
+                if !(*array_chunks.next().unwrap() == boot_api::API_VERSION.to_ne_bytes()) {
+                    return Err(LoadApplicationError::UnuspportedApplicationRequest);
+                }
+                request_found = true;
+            }
             SegmentType::NULL
             | SegmentType::DYNAMIC
             | SegmentType::INTERP
@@ -142,6 +166,9 @@ pub fn load_application(
                 });
             }
         }
+    }
+    if !request_found {
+        return Err(LoadApplicationError::UnuspportedApplicationRequest);
     }
 
     for header in program_header_table
@@ -185,7 +212,6 @@ pub fn load_application(
             let addend = i64::from_le_bytes(*rela[16..].first_chunk::<8>().unwrap());
 
             let rela_type = info & 0xFFFF_FFFF;
-
             match rela_type {
                 8 => {
                     let value = slide.checked_add_signed(addend).unwrap();
@@ -201,7 +227,7 @@ pub fn load_application(
                 relocation_type => {
                     return Err(LoadApplicationError::UnsupportedRelocationType(
                         relocation_type,
-                    ))
+                    ));
                 }
             }
         }
@@ -224,6 +250,8 @@ pub enum LoadApplicationError {
     RngFailure,
     /// [`SegmentType::LOAD`] virtual ranges overlap.
     OverlappingLoadSegments,
+    /// The application is missing a boot request.
+    UnuspportedApplicationRequest,
     /// A relocation table is present, but the size of the relocation cannot be determined.
     MissingRelaSize,
     /// A relocation table is present, but the size of a relocation entry cannot be determined.
@@ -249,6 +277,9 @@ impl fmt::Display for LoadApplicationError {
             }
             Self::RngFailure => write!(f, "rng failed"),
             Self::OverlappingLoadSegments => write!(f, "overlapping load segments"),
+            Self::UnuspportedApplicationRequest => {
+                write!(f, "missing or unsupported application boot request")
+            }
             Self::MissingRelaSize => write!(f, "missing dynamic rela size tag"),
             Self::MissingRelaEntrySize => write!(f, "missing dynamic rela entry size tag"),
             Self::UnsupportedRelocationType(rel_type) => {
