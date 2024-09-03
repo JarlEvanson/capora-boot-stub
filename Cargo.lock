@@ -276,6 +276,9 @@ dependencies = [
 [[package]]
 name = "test-application"
 version = "0.1.0"
+dependencies = [
+ "boot-api",
+]
 
 [[package]]
 name = "ucs2"
