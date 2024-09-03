@@ -66,7 +66,7 @@ checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
 [[package]]
 name = "boot-api"
 version = "0.1.0"
-source = "git+https://github.com/JarlEvanson/capora-boot-api.git#6b3959c02271266d4b13bd0a622be473b77b5577"
+source = "git+https://github.com/JarlEvanson/capora-boot-api.git#8f2609bf3d465279cc630dd60fa6634f0ce57e11"
 
 [[package]]
 name = "boot-stub"
