@@ -91,12 +91,29 @@ fn main() -> Status {
             return Status::LOAD_ERROR;
         }
     };
-    let memery_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
+
+    let _ = with_stdout(|stdout| writeln!(stdout, "Stack {stack:X} GDT: {gdt:X}"));
+
+    let top_level_page = paging::map(virtual_map);
+    let _ = with_stdout(|stdout| writeln!(stdout, "Creating page tables at {top_level_page:X}"));
+    let _ = with_stdout(|stdout| writeln!(stdout, "Exiting boot services"));
+    let memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
 
     // Already checked that the required bits are supported.
     let _ = set_required_bits();
+    load_gdt(gdt);
 
-    loop {}
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "jmp {context_switch}",
+            context_switch = in(reg) context_switch,
+            in("rax") top_level_page,
+            in("rcx") stack.wrapping_add(LOADED_STACK_SIZE),
+            in("rdx") entry_point,
+            options(noreturn)
+        )
+    }
 }
 
 /// Checks if the provided [`Output`][out] is in mode -1, and if so, searches for the mode with the
