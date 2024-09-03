@@ -112,7 +112,7 @@ pub fn setup_output(output: &mut text::Output) {
             let mode = output
                 .modes()
                 .max_by(|mode_0, mode_1| mode_0.rows().cmp(&mode_1.rows()))
-                .expect("according to UEFI specification, at least one mode must be supported");
+                .expect("according to the UEFI specification, at least one mode must be supported");
 
             // Just ignore any errors, we can't report them and we shouldn't not continue due to
             // missing output.
