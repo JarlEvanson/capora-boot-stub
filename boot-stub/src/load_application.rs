@@ -303,18 +303,8 @@ impl fmt::Display for LoadApplicationError {
 
 /// Returns a random [`u64`], returning [`None`] if the attempt fails.
 pub fn rand_u64() -> Option<u64> {
-    let success: u8;
-    unsafe {
-        core::arch::asm!(
-            "mov eax, 7",
-            "mov ecx, 0",
-            "cpuid",
-            "bt ebx, 18",
-            "setc {}",
-            out(reg_byte) success,
-        )
-    };
-    if success == 0 {
+    let rdrand_supported_bit = unsafe { core::arch::x86_64::__cpuid(7).ebx };
+    if !(rdrand_supported_bit & (1 << 18) == (1 << 18)) {
         return None;
     }
 
