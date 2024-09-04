@@ -92,7 +92,7 @@ impl ApplicationMemoryMap {
         protection: Protection,
     ) -> Option<&mut Entry> {
         let index = self.check_add_reqs(pages, frames)?;
-        let mut entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
+        let entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
 
         if self.length == self.capacity {
             self.grow();
@@ -100,15 +100,16 @@ impl ApplicationMemoryMap {
 
         unsafe {
             core::ptr::copy(
-                self.as_slice()[index..].as_ptr(),
-                self.as_slice()[index + 1..].as_ptr().cast_mut(),
+                self.ptr.add(index),
+                self.ptr.add(index + 1),
                 self.length - index,
             )
         }
 
+        unsafe {
+            self.ptr.add(index).write(entry);
+        }
         self.length += 1;
-        core::mem::swap(&mut self.as_slice_mut()[index], &mut entry);
-        mem::forget(entry);
 
         self.as_slice_mut().get_mut(index)
     }
@@ -146,7 +147,11 @@ impl ApplicationMemoryMap {
     pub fn lookup(&self, virtual_address: u64) -> Option<&Entry> {
         self.as_slice()
             .iter()
-            .filter(|entry| entry.page_range().contains(virtual_address >> 12))
+            .filter(|entry| {
+                entry
+                    .page_range()
+                    .contains((virtual_address >> 12) & PageRange::PAGE_MASK)
+            })
             .next()
     }
 
@@ -155,7 +160,11 @@ impl ApplicationMemoryMap {
     pub fn lookup_mut(&mut self, virtual_address: u64) -> Option<&mut Entry> {
         self.as_slice_mut()
             .iter_mut()
-            .filter(|entry| entry.page_range().contains(virtual_address >> 12))
+            .filter(|entry| {
+                entry
+                    .page_range()
+                    .contains((virtual_address >> 12) & PageRange::PAGE_MASK)
+            })
             .next()
     }
 
@@ -202,7 +211,7 @@ impl ApplicationMemoryMap {
 }
 
 /// A virtual memory region and its flags.
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq)]
 pub struct Entry {
     page: u64,
     frame: u64,
@@ -292,6 +301,19 @@ impl Entry {
                 self.size() as usize * 4096,
             )
         }
+    }
+}
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("Entry");
+
+        debug_struct.field("page", &self.page());
+        debug_struct.field("frame", &self.frame());
+        debug_struct.field("size", &self.size());
+        debug_struct.field("protection", &self.protection());
+
+        debug_struct.finish()
     }
 }
 
