@@ -104,11 +104,7 @@ fn main() -> Status {
         }
     };
 
-    let _ = with_stdout(|stdout| writeln!(stdout, "Stack {stack:X} GDT: {gdt:X}"));
-
     let top_level_page = paging::map(virtual_map);
-    let _ = with_stdout(|stdout| writeln!(stdout, "Creating page tables at {top_level_page:X}"));
-    let _ = with_stdout(|stdout| writeln!(stdout, "Exiting boot services"));
     let memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
 
     // Already checked that the required bits are supported.

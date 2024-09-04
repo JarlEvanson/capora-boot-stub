@@ -275,7 +275,7 @@ impl PageRange {
     }
 
     /// The starting page of this [`PageRange`].
-    pub fn page(self) -> u64 {
+    pub const fn page(self) -> u64 {
         self.page_number
     }
 
@@ -292,6 +292,11 @@ impl PageRange {
     /// Checks if `page_number` is inside this [`PageRange`].
     pub const fn contains(self, page_number: u64) -> bool {
         self.page_number <= page_number && page_number < self.page_number + self.size
+    }
+
+    /// Checks if `pages` overlaps with `self`.
+    pub const fn overlaps(self, pages: PageRange) -> bool {
+        self.page() < pages.page() + pages.size() && pages.page() < self.page() + self.size()
     }
 }
 
@@ -318,13 +323,18 @@ impl FrameRange {
         Some(Self { frame_number, size })
     }
 
+    /// The physical address at the start of this [`FrameRange`].
+    pub const fn physical_address(self) -> u64 {
+        self.frame() << 12
+    }
+
     /// The starting frame of this [`FrameRange`].
-    pub fn frame(self) -> u64 {
+    pub const fn frame(self) -> u64 {
         self.frame_number
     }
 
     /// The number of frames this [`FrameRange`] includes.
-    pub fn size(self) -> u64 {
+    pub const fn size(self) -> u64 {
         self.size
     }
 }
