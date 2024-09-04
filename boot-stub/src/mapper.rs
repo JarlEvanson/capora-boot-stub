@@ -6,6 +6,260 @@ use core::{
     ptr::{self, NonNull},
 };
 
+use uefi::boot;
+
+use crate::load_application::rand_u64;
+
+pub struct ApplicationMemoryMap {
+    ptr: *mut Entry,
+    capacity: usize,
+    length: usize,
+}
+
+impl ApplicationMemoryMap {
+    /// Creates a new [`ApplicationMemoryMap`].
+    pub fn new() -> Self {
+        Self {
+            ptr: ptr::null_mut(),
+            capacity: 0,
+            length: 0,
+        }
+    }
+
+    pub fn allocate(&mut self, page_count: u64, protection: Protection) -> &mut Entry {
+        let virtual_address = loop {
+            let page = (rand_u64().expect("random number generator failed") & PageRange::PAGE_MASK)
+                | PageRange::EXTENDED_BIT_PAGE; // Enforce supervisor mode memory region.
+
+            let Some(pages) = PageRange::new(page, page_count) else {
+                continue;
+            };
+
+            match self.allocate_at(pages, protection) {
+                Some(entry) => break entry.page_range().virtual_address(),
+                None => continue,
+            }
+        };
+
+        self.lookup_mut(virtual_address).unwrap()
+    }
+
+    pub fn allocate_at(&mut self, pages: PageRange, protection: Protection) -> Option<&mut Entry> {
+        let mem_type = if protection == Protection::Executable {
+            boot::MemoryType::LOADER_CODE
+        } else {
+            boot::MemoryType::LOADER_DATA
+        };
+
+        let frames = boot::allocate_pages(
+            boot::AllocateType::AnyPages,
+            mem_type,
+            pages.size() as usize,
+        )
+        .expect("memory region allocation failed");
+        let frames = FrameRange::new((frames.as_ptr() as u64) >> 12, pages.size())
+            .expect("memory allocation function failed");
+
+        unsafe { self.add_region(pages, frames, protection) }
+    }
+
+    pub unsafe fn add_region(
+        &mut self,
+        pages: PageRange,
+        frames: FrameRange,
+        protection: Protection,
+    ) -> Option<&mut Entry> {
+        let index = self.check_add_reqs(pages, frames)?;
+        let entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
+
+        if self.length == self.capacity {
+            self.grow();
+        }
+
+        let length = self.length;
+        self.length += 1;
+        self.as_uninit_slice_mut()
+            .copy_within(index..length, index + 1);
+        let new_entry = self.as_uninit_slice_mut()[index].write(entry);
+        Some(new_entry)
+    }
+
+    fn check_add_reqs(&self, pages: PageRange, frames: FrameRange) -> Option<usize> {
+        if pages.size() != frames.size() {
+            return None;
+        }
+
+        let Err(index) = self
+            .as_slice()
+            .binary_search_by_key(&pages.page(), |entry| entry.page())
+        else {
+            return None;
+        };
+
+        let overlaps_lower = self
+            .as_slice()
+            .get(index)
+            .is_some_and(|entry| entry.page_range().overlaps(pages));
+        let overlaps_higher = self
+            .as_slice()
+            .get(index + 1)
+            .is_some_and(|entry| entry.page_range().overlaps(pages));
+
+        if overlaps_lower || overlaps_higher {
+            return None;
+        }
+
+        Some(index)
+    }
+
+    pub fn lookup(&self, virtual_address: u64) -> Option<&Entry> {
+        self.as_slice()
+            .binary_search_by_key(&virtual_address, |entry| {
+                entry.page_range().virtual_address()
+            })
+            .ok()
+            .and_then(|index| self.as_slice().get(index))
+    }
+
+    pub fn lookup_mut(&mut self, virtual_address: u64) -> Option<&mut Entry> {
+        self.as_slice()
+            .binary_search_by_key(&virtual_address, |entry| {
+                entry.page_range().virtual_address()
+            })
+            .ok()
+            .and_then(|index| self.as_slice_mut().get_mut(index))
+    }
+
+    fn as_slice(&self) -> &[Entry] {
+        if self.length == 0 {
+            return &[];
+        }
+
+        unsafe { core::slice::from_raw_parts(self.ptr, self.length) }
+    }
+
+    fn as_slice_mut(&self) -> &mut [Entry] {
+        if self.length == 0 {
+            return &mut [];
+        }
+
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.length) }
+    }
+
+    fn grow(&mut self) {
+        let new_capacity = if self.capacity == 0 {
+            4
+        } else {
+            self.capacity * 2
+        };
+
+        let allocation = boot::allocate_pool(
+            boot::MemoryType::LOADER_DATA,
+            new_capacity * mem::size_of::<Entry>(),
+        )
+        .expect("memory map allocation failed");
+        let new_ptr = allocation.as_ptr().cast::<Entry>();
+
+        if let Some(old_ptr) = NonNull::new(self.ptr) {
+            unsafe { core::ptr::copy_nonoverlapping(self.ptr, new_ptr, self.length) };
+
+            unsafe { boot::free_pool(old_ptr.cast::<u8>()).expect("deallocation failed") }
+        }
+
+        self.ptr = new_ptr;
+        self.capacity = new_capacity;
+    }
+
+    fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<Entry>] {
+        if self.length == 0 {
+            return &mut [];
+        }
+
+        unsafe {
+            core::slice::from_raw_parts_mut(self.ptr.cast::<MaybeUninit<Entry>>(), self.length)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Entry {
+    page: u64,
+    frame: u64,
+    size: u64,
+}
+
+impl Entry {
+    fn new(page: u64, frame: u64, size: u64, flags: Protection) -> Self {
+        Self {
+            page,
+            frame,
+            size: size | ((flags as u64) << 62),
+        }
+    }
+
+    pub fn page_range(&self) -> PageRange {
+        PageRange {
+            page_number: self.page(),
+            size: self.size(),
+        }
+    }
+
+    pub fn frame_range(&self) -> FrameRange {
+        FrameRange {
+            frame_number: self.frame(),
+            size: self.size(),
+        }
+    }
+
+    pub fn page(&self) -> u64 {
+        self.page
+    }
+
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size & 0x3FFF_FFFF_FFFF_FFFF
+    }
+
+    pub fn protection(&self) -> Protection {
+        match self.size >> 62 {
+            0 => Protection::NotPresent,
+            1 => Protection::Readable,
+            2 => Protection::Writable,
+            3 => Protection::Executable,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                (self.frame() << 12) as *const u8,
+                self.size() as usize * 4096,
+            )
+        }
+    }
+
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                (self.frame() << 12) as *mut u8,
+                self.size() as usize * 4096,
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Protection {
+    NotPresent = 0,
+    Readable = 1,
+    Writable = 2,
+    Executable = 3,
+}
+
 /// An ordered collection of non-overlapping virtual memory ranges and underlying physical ranges.
 pub struct VirtualMemoryMap {
     map_ptr: *mut VirtualMemoryMapEntry,
