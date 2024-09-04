@@ -10,6 +10,7 @@ use uefi::boot;
 
 use crate::load_application::rand_u64;
 
+/// A map of the virtual memory space into which the application will be loaded.
 pub struct ApplicationMemoryMap {
     ptr: *mut Entry,
     capacity: usize,
@@ -26,6 +27,8 @@ impl ApplicationMemoryMap {
         }
     }
 
+    /// Generates a random page to be the base of the region in virtual memory, marks it to be
+    /// mapped according to `protection`, and allocates physical memory to back the allocation.
     pub fn allocate(&mut self, page_count: u64, protection: Protection) -> &mut Entry {
         let virtual_address = loop {
             let page = (rand_u64().expect("random number generator failed") & PageRange::PAGE_MASK)
@@ -44,7 +47,19 @@ impl ApplicationMemoryMap {
         self.lookup_mut(virtual_address).unwrap()
     }
 
+    /// Marks the region at `pages` to be mapped according to `protection`, and allocates physical
+    /// memory to back the page region.
     pub fn allocate_at(&mut self, pages: PageRange, protection: Protection) -> Option<&mut Entry> {
+        if protection == Protection::NotPresent {
+            unsafe {
+                return self.add_region(
+                    pages,
+                    FrameRange::new(1, pages.size()).unwrap(),
+                    protection,
+                );
+            };
+        }
+
         let mem_type = if protection == Protection::Executable {
             boot::MemoryType::LOADER_CODE
         } else {
@@ -63,6 +78,13 @@ impl ApplicationMemoryMap {
         unsafe { self.add_region(pages, frames, protection) }
     }
 
+    /// Adds the virtual region `pages` backed by the physical region `frames`.
+    ///
+    /// # Safety
+    /// Access to the region of `frames`, which exists as an identity mapped region, must be
+    /// controlled completely by this `self`.
+    ///
+    /// It must be safe to read and write to the region given by `frames`.
     pub unsafe fn add_region(
         &mut self,
         pages: PageRange,
@@ -70,22 +92,29 @@ impl ApplicationMemoryMap {
         protection: Protection,
     ) -> Option<&mut Entry> {
         let index = self.check_add_reqs(pages, frames)?;
-        let entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
+        let mut entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
 
         if self.length == self.capacity {
             self.grow();
         }
 
-        let length = self.length;
+        unsafe {
+            core::ptr::copy(
+                self.as_slice()[index..].as_ptr(),
+                self.as_slice()[index + 1..].as_ptr().cast_mut(),
+                self.length - index,
+            )
+        }
+
         self.length += 1;
-        self.as_uninit_slice_mut()
-            .copy_within(index..length, index + 1);
-        let new_entry = self.as_uninit_slice_mut()[index].write(entry);
-        Some(new_entry)
+        core::mem::swap(&mut self.as_slice_mut()[index], &mut entry);
+        mem::forget(entry);
+
+        self.as_slice_mut().get_mut(index)
     }
 
     fn check_add_reqs(&self, pages: PageRange, frames: FrameRange) -> Option<usize> {
-        if pages.size() != frames.size() {
+        if pages.size() != frames.size() || frames.frame() == 0 {
             return None;
         }
 
@@ -112,25 +141,26 @@ impl ApplicationMemoryMap {
         Some(index)
     }
 
+    /// Searches the [`ApplicationMemoryMap`] for the [`Entry`] that contains `virtual_address` and
+    /// returns a reference to it.
     pub fn lookup(&self, virtual_address: u64) -> Option<&Entry> {
         self.as_slice()
-            .binary_search_by_key(&virtual_address, |entry| {
-                entry.page_range().virtual_address()
-            })
-            .ok()
-            .and_then(|index| self.as_slice().get(index))
+            .iter()
+            .filter(|entry| entry.page_range().contains(virtual_address >> 12))
+            .next()
     }
 
+    /// Searches the [`ApplicationMemoryMap`] for the [`Entry`] that contains `virtual_address` and
+    /// returns a mutable reference to it.
     pub fn lookup_mut(&mut self, virtual_address: u64) -> Option<&mut Entry> {
-        self.as_slice()
-            .binary_search_by_key(&virtual_address, |entry| {
-                entry.page_range().virtual_address()
-            })
-            .ok()
-            .and_then(|index| self.as_slice_mut().get_mut(index))
+        self.as_slice_mut()
+            .iter_mut()
+            .filter(|entry| entry.page_range().contains(virtual_address >> 12))
+            .next()
     }
 
-    fn as_slice(&self) -> &[Entry] {
+    /// Returns an immutable slice over the [`Entry`] that make up the [`ApplicationMemoryMap`].
+    pub fn as_slice(&self) -> &[Entry] {
         if self.length == 0 {
             return &[];
         }
@@ -169,19 +199,10 @@ impl ApplicationMemoryMap {
         self.ptr = new_ptr;
         self.capacity = new_capacity;
     }
-
-    fn as_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<Entry>] {
-        if self.length == 0 {
-            return &mut [];
-        }
-
-        unsafe {
-            core::slice::from_raw_parts_mut(self.ptr.cast::<MaybeUninit<Entry>>(), self.length)
-        }
-    }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// A virtual memory region and its flags.
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Entry {
     page: u64,
     frame: u64,
@@ -197,6 +218,7 @@ impl Entry {
         }
     }
 
+    /// The virtual memory region this [`Entry`] represents.
     pub fn page_range(&self) -> PageRange {
         PageRange {
             page_number: self.page(),
@@ -204,6 +226,7 @@ impl Entry {
         }
     }
 
+    /// The backing physical memory range.
     pub fn frame_range(&self) -> FrameRange {
         FrameRange {
             frame_number: self.frame(),
@@ -211,18 +234,22 @@ impl Entry {
         }
     }
 
+    /// The starting page of the virtual memory region.
     pub fn page(&self) -> u64 {
         self.page
     }
 
+    /// The starting frame of the backing physical memory.
     pub fn frame(&self) -> u64 {
         self.frame
     }
 
+    /// The number of pages this region covers.
     pub fn size(&self) -> u64 {
         self.size & 0x3FFF_FFFF_FFFF_FFFF
     }
 
+    /// The settings on the virtual memory region when the application is loaded.
     pub fn protection(&self) -> Protection {
         match self.size >> 62 {
             0 => Protection::NotPresent,
@@ -233,7 +260,15 @@ impl Entry {
         }
     }
 
+    /// Returns an immutable reference to the bytes making the physical page backing the memory.
+    ///
+    /// When the [`Protection`] setting is [`Protection::NotPresent`], then this returns a
+    /// zero-sized slice.
     pub fn as_bytes(&self) -> &[u8] {
+        if self.protection() == Protection::NotPresent {
+            return &[];
+        }
+
         unsafe {
             core::slice::from_raw_parts(
                 (self.frame() << 12) as *const u8,
@@ -242,7 +277,15 @@ impl Entry {
         }
     }
 
+    /// Returns a mutable reference to the bytes making the physical page backing the memory.
+    ///
+    /// When the [`Protection`] setting is [`Protection::NotPresent`], then this returns a
+    /// zero-sized slice.
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        if self.protection() == Protection::NotPresent {
+            return &mut [];
+        }
+
         unsafe {
             core::slice::from_raw_parts_mut(
                 (self.frame() << 12) as *mut u8,
@@ -252,11 +295,16 @@ impl Entry {
     }
 }
 
+/// The protection settings on the application virtual memory map.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Protection {
+    /// The virtual memory region should not be occupied.
     NotPresent = 0,
+    /// The virtual memory region should be readable.
     Readable = 1,
+    /// The virtual memory region should be readable and writable.
     Writable = 2,
+    /// The virtual memory region should be readable and executable.
     Executable = 3,
 }
 
