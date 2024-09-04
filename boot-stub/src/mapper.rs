@@ -269,6 +269,31 @@ impl Entry {
         }
     }
 
+    /// Whether the segment will be mapped into the application's virtual address space.
+    pub fn present(&self) -> bool {
+        match self.protection() {
+            Protection::NotPresent => false,
+            _ => true,
+        }
+    }
+
+    /// Whether the segment will be mapped as writable in the application's virtual address space.
+    pub fn writable(&self) -> bool {
+        match self.protection() {
+            Protection::Writable => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the segment will be mapped as executable in the application's virtual address
+    /// space.
+    pub fn executable(&self) -> bool {
+        match self.protection() {
+            Protection::Executable => true,
+            _ => false,
+        }
+    }
+
     /// Returns an immutable reference to the bytes making the physical page backing the memory.
     ///
     /// When the [`Protection`] setting is [`Protection::NotPresent`], then this returns a
