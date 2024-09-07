@@ -15,7 +15,7 @@ pub fn map_app(map: ApplicationMemoryMap) -> u64 {
 
     for entry in map.as_slice().iter().filter(|entry| entry.present()) {
         let mut page = entry.page();
-        while entry.page_range().contains(page << 12) {
+        while entry.page_range().contains(page) {
             let pml4e = get_pml4e_page_index(page);
             if pml4e != pml4e_index {
                 pml4e_index = pml4e;
@@ -70,7 +70,7 @@ pub fn map_app(map: ApplicationMemoryMap) -> u64 {
         let mut page = entry.page();
         let mut frame = entry.frame();
 
-        while entry.page_range().contains(page << 12) {
+        while entry.page_range().contains(page) {
             let pml4e = get_pml4e_page_index(page);
             if pml4e != pml4e_index {
                 pml3e_table = page_tables.next().unwrap();
