@@ -298,14 +298,14 @@ impl Entry {
     ///
     /// When the [`Protection`] setting is [`Protection::NotPresent`], then this returns a
     /// zero-sized slice.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[MaybeUninit<u8>] {
         if self.protection() == Protection::NotPresent {
             return &[];
         }
 
         unsafe {
             core::slice::from_raw_parts(
-                (self.frame() << 12) as *const u8,
+                (self.frame() << 12) as *const MaybeUninit<u8>,
                 self.size() as usize * 4096,
             )
         }
@@ -315,14 +315,14 @@ impl Entry {
     ///
     /// When the [`Protection`] setting is [`Protection::NotPresent`], then this returns a
     /// zero-sized slice.
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+    pub fn as_bytes_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         if self.protection() == Protection::NotPresent {
             return &mut [];
         }
 
         unsafe {
             core::slice::from_raw_parts_mut(
-                (self.frame() << 12) as *mut u8,
+                (self.frame() << 12) as *mut MaybeUninit<u8>,
                 self.size() as usize * 4096,
             )
         }
