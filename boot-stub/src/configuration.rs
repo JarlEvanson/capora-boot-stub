@@ -63,31 +63,10 @@ impl fmt::Debug for LoadedEntry {
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
 ) -> Result<(LoadedEntry, &'static mut [LoadedEntry]), ParseAndInterpretConfigurationError> {
-    // Get base and size of the loaded image.
-    let (image_base, image_size) = get_image_data()?;
-    use core::fmt::Write;
-    let _ = uefi::system::with_stdout(|stdout| {
-        writeln!(stdout, "capora-boot-stub loaded at {image_base:p}")
-    });
-
-    // SAFETY:
-    // We create and drop this slice as quickly as possible, and we don't interact with any
-    // global variables while doing so, so this should be as safe as possible.
-    let slice = unsafe { core::slice::from_raw_parts(image_base, image_size) };
-    let section_header_table = section_header_table(slice)?;
+    let (config_section, embedded_section) = get_sections()?;
 
     // Acquire the [`Configuration`].
-    let configuration = {
-        let section_header = section_header_table
-            .find_section(SECTION_NAME)
-            .ok_or(ParseAndInterpretConfigurationError::MissingConfiguration)?;
-        let config_section_base =
-            unsafe { image_base.add(section_header.virtual_address as usize) };
-        let config_section = unsafe {
-            core::slice::from_raw_parts(config_section_base, section_header.virtual_size as usize)
-        };
-        Configuration::parse(config_section)?
-    };
+    let configuration = Configuration::parse(config_section)?;
 
     // Check if the [`Configuration`] has any unrecognized flags.
     if configuration.flags().0 & !ConfigurationFlags::SUPPORTED.0 != 0 {
@@ -110,17 +89,6 @@ pub fn parse_and_interprete_configuration(
             });
         }
     }
-
-    let embedded_section = 'section: {
-        let Some(section_header) = section_header_table.find_section(EMBEDDED_SECTION_NAME) else {
-            break 'section None;
-        };
-        let section_base = unsafe { image_base.add(section_header.virtual_address as usize) };
-        let section = unsafe {
-            core::slice::from_raw_parts(section_base, section_header.virtual_size as usize)
-        };
-        Some(section)
-    };
 
     let mut entries = configuration.entries();
     let application_entry = entries
@@ -210,14 +178,9 @@ pub fn parse_and_interprete_configuration(
 /// Various errors that can occur while parsing and interpreting [`Configuration`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseAndInterpretConfigurationError {
-    /// An error ocurred while acquiring image data.
-    GetImageDataError(GetImageDataError),
-    /// An error ocurred while locating the image's [`SectionHeaderTable`][sht].
-    ///
-    /// [sht]: config::pe::SectionHeaderTable
-    LocateSectionHeaderTableError(LocateSectionHeaderTableError),
-    /// The configuration section is missing.
-    MissingConfiguration,
+    /// An error ocurred while acquiring the configuration section and, if present, the embedded
+    /// data section.
+    GetSectionsError(GetSectionsError),
     /// An error occurred while parsing the [`Configuration`].
     ConfigurationError(ParseConfigurationError),
     /// An [`Configuration`] flag wasn't recognized.
@@ -242,15 +205,9 @@ pub enum ParseAndInterpretConfigurationError {
     },
 }
 
-impl From<GetImageDataError> for ParseAndInterpretConfigurationError {
-    fn from(value: GetImageDataError) -> Self {
-        Self::GetImageDataError(value)
-    }
-}
-
-impl From<LocateSectionHeaderTableError> for ParseAndInterpretConfigurationError {
-    fn from(value: LocateSectionHeaderTableError) -> Self {
-        Self::LocateSectionHeaderTableError(value)
+impl From<GetSectionsError> for ParseAndInterpretConfigurationError {
+    fn from(value: GetSectionsError) -> Self {
+        Self::GetSectionsError(value)
     }
 }
 
@@ -263,13 +220,7 @@ impl From<ParseConfigurationError> for ParseAndInterpretConfigurationError {
 impl fmt::Display for ParseAndInterpretConfigurationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GetImageDataError(error) => {
-                write!(f, "error retrieving image information: {error}",)
-            }
-            Self::LocateSectionHeaderTableError(error) => {
-                write!(f, "error locating section header table: {error}")
-            }
-            Self::MissingConfiguration => write!(f, "missing configuration section"),
+            Self::GetSectionsError(error) => write!(f, "failed to get required sections: {error}",),
             Self::ConfigurationError(error) => write!(f, "error parsing configuration: {error:?}"),
             Self::UnsupportedConfigurationFlags(flags) => {
                 write!(f, "unsupported configuration flags: {:b}", flags)
@@ -288,6 +239,83 @@ impl fmt::Display for ParseAndInterpretConfigurationError {
 }
 
 impl error::Error for ParseAndInterpretConfigurationError {}
+
+/// Retrives the configuration section, and, if present, the embedded data section.
+fn get_sections() -> Result<(&'static [u8], Option<&'static [u8]>), GetSectionsError> {
+    let (image_base, image_size) = get_image_data()?;
+
+    let slice = unsafe { core::slice::from_raw_parts(image_base, image_size) };
+    let section_header_table = section_header_table(&slice)?;
+
+    let configuration_section = {
+        let section_header = section_header_table
+            .find_section(SECTION_NAME)
+            .ok_or(GetSectionsError::MissingConfigurationSection)?;
+        let configuration_section_base =
+            unsafe { image_base.add(section_header.virtual_address as usize) };
+        unsafe {
+            core::slice::from_raw_parts(
+                configuration_section_base,
+                section_header.virtual_size as usize,
+            )
+        }
+    };
+
+    let embedded_section = 'embedded: {
+        let Some(section_header) = section_header_table.find_section(EMBEDDED_SECTION_NAME) else {
+            break 'embedded None;
+        };
+
+        let configuration_section_base =
+            unsafe { image_base.add(section_header.virtual_address as usize) };
+        unsafe {
+            Some(core::slice::from_raw_parts(
+                configuration_section_base,
+                section_header.virtual_size as usize,
+            ))
+        }
+    };
+
+    Ok((configuration_section, embedded_section))
+}
+
+/// Various errors that can occur while retrieving the configuration section and, if present, the embedded data
+/// section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GetSectionsError {
+    /// An error ocurred while acquiring image data.
+    ImageDataError(GetImageDataError),
+    /// An error occurred while locating the section header table of the image.
+    SectionHeaderTableError(LocateSectionHeaderTableError),
+    /// The configuration section is not present.
+    MissingConfigurationSection,
+}
+
+impl From<GetImageDataError> for GetSectionsError {
+    fn from(value: GetImageDataError) -> Self {
+        Self::ImageDataError(value)
+    }
+}
+
+impl From<LocateSectionHeaderTableError> for GetSectionsError {
+    fn from(value: LocateSectionHeaderTableError) -> Self {
+        Self::SectionHeaderTableError(value)
+    }
+}
+
+impl fmt::Display for GetSectionsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ImageDataError(error) => write!(f, "failed to retrieve image data: {error}"),
+            Self::SectionHeaderTableError(error) => {
+                write!(f, "failed to locate image section header table: {error}")
+            }
+            Self::MissingConfigurationSection => write!(f, "missing configuration section",),
+        }
+    }
+}
+
+impl error::Error for GetSectionsError {}
 
 /// Loads the data referenced by the provided [`Entry`].
 pub fn load_entry<'config>(
