@@ -18,6 +18,8 @@ use uefi::{
     Status,
 };
 
+use crate::mapper::{ApplicationMemoryMap, Protection};
+
 /// A loaded [`Entry`].
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LoadedEntry {
@@ -62,6 +64,7 @@ impl fmt::Debug for LoadedEntry {
 
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
+    application_map: &mut ApplicationMemoryMap,
 ) -> Result<(LoadedEntry, &'static mut [LoadedEntry]), ParseAndInterpretConfigurationError> {
     let (config_section, embedded_section) = get_sections()?;
 
@@ -94,13 +97,33 @@ pub fn parse_and_interprete_configuration(
     let application_entry = entries
         .next()
         .ok_or(ParseAndInterpretConfigurationError::MissingApplicationEntry)?;
-    let application = load_entry(configuration, embedded_section, application_entry)
+    let (application_name, application_size, application_data) =
+        get_entry_data(configuration, application_entry)
+            .map_err(ParseAndInterpretConfigurationError::LoadApplicationError)?;
+    let application_page_count = application_size.div_ceil(4096);
+    let application_pages = boot::allocate_pages(
+        boot::AllocateType::AnyPages,
+        boot::MemoryType::LOADER_DATA,
+        application_page_count,
+    );
+    let application_pages = application_pages.map_err(|_| {
+        ParseAndInterpretConfigurationError::LoadApplicationError(LoadEntryError::AllocationFailed)
+    })?;
+    let application_bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            application_pages.as_ptr().cast::<MaybeUninit<u8>>(),
+            application_size,
+        )
+    };
+
+    load_entry(embedded_section, application_bytes, application_data)
         .map_err(ParseAndInterpretConfigurationError::LoadApplicationError)?;
+
     let application = LoadedEntry {
-        name: application.0.as_ptr(),
-        name_length: application.0.len(),
-        address: application.1,
-        size: application.2,
+        name: application_name.as_ptr(),
+        name_length: application_name.len(),
+        address: application_bytes.as_ptr().cast::<u8>(),
+        size: application_size,
     };
 
     let module_count = configuration.entry_count() - 1;
@@ -155,21 +178,27 @@ pub fn parse_and_interprete_configuration(
 
     let mut string_index = 0;
     for (index, entry) in entries.enumerate() {
-        let (name, base, size) =
-            load_entry(configuration, embedded_section, entry).map_err(|error| {
-                ParseAndInterpretConfigurationError::LoadEntryError { index, error }
-            })?;
+        let (module_name, module_size, module_data) = get_entry_data(configuration, entry)
+            .map_err(
+                |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
+            )?;
+        let module_page_count = module_size.div_ceil(4096);
+
+        let memory_entry = application_map.allocate(module_page_count as u64, Protection::Writable);
+        load_entry(embedded_section, memory_entry.as_bytes_mut(), module_data).map_err(
+            |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
+        )?;
 
         let loaded_entry = LoadedEntry {
             name: string_slice[string_index..].as_ptr(),
-            name_length: name.len(),
-            address: base,
-            size,
+            name_length: module_name.len(),
+            address: memory_entry.as_bytes().as_ptr().cast::<u8>(),
+            size: module_size,
         };
         loaded_entry_slice[index] = loaded_entry;
 
-        string_slice[string_index..][..name.len()].copy_from_slice(name.as_bytes());
-        string_index += name.len();
+        string_slice[string_index..][..module_name.len()].copy_from_slice(module_name.as_bytes());
+        string_index += module_name.len();
     }
 
     Ok((application, loaded_entry_slice))
@@ -317,164 +346,128 @@ impl fmt::Display for GetSectionsError {
 
 impl error::Error for GetSectionsError {}
 
-/// Loads the data referenced by the provided [`Entry`].
-pub fn load_entry<'config>(
-    configuration: Configuration<'config>,
-    embedded_section: Option<&'static [u8]>,
-    target_entry: Entry<'config>,
-) -> Result<(&'config str, *mut u8, usize), LoadEntryError> {
-    match target_entry {
-        Entry::Embedded(entry) => {
-            let name = get_name(configuration, target_entry)?;
+/// Loads the data pointed to by [`EntryData`].
+pub fn load_entry<'bytes>(
+    embedded_section: Option<&[u8]>,
+    bytes: &'bytes mut [MaybeUninit<u8>],
+    entry_data: EntryData,
+) -> Result<&'bytes mut [u8], LoadEntryError> {
+    let bytes = match entry_data {
+        EntryData::Embedded { data_offset } => {
             let Some(embedded_section) = embedded_section else {
                 return Err(LoadEmbeddedEntryError::MissingEmbeddedSection.into());
             };
 
-            let page_count = entry.data_length().div_ceil(4096) as usize;
-            let pages = boot::allocate_pages(
-                boot::AllocateType::AnyPages,
-                boot::MemoryType::LOADER_DATA,
-                page_count,
-            );
-            let pages = pages.map_err(|error| LoadEntryError::AllocationFailed {
-                page_count,
-                status: error.status(),
-            })?;
+            let data_max = match data_offset.checked_add(bytes.len()) {
+                Some(data_max) if data_max <= embedded_section.len() => data_max,
+                _ => return Err(LoadEmbeddedEntryError::DataOutOfBounds.into()),
+            };
 
-            let name_max = entry.data_offset().checked_add(entry.data_length());
-            if !name_max.is_some_and(|value| value as usize <= embedded_section.len()) {
-                return Err(LoadEmbeddedEntryError::DataOutOfBounds.into());
-            }
-
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    embedded_section[entry.data_offset() as usize..].as_ptr(),
-                    pages.as_ptr(),
-                    entry.data_length() as usize,
-                )
-            }
-
-            Ok((name, pages.as_ptr(), entry.data_length() as usize))
+            MaybeUninit::copy_from_slice(bytes, &embedded_section[data_offset..data_max])
         }
-        Entry::BootFilesystem(_) => todo!(),
-        Entry::Unknown {
-            entry_type: _,
-            slice: _,
-        } => unreachable!("unknown entry should have caused an error already"),
-    }
+    };
+
+    Ok(bytes)
 }
 
-/// Various errors that can occur while loading an [`Entry`].
+/// Various errors that can occur while loading an entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadEntryError {
-    /// An allocation failed.
-    AllocationFailed {
-        /// The number of pages the failing allocation attempted to allocate.
-        page_count: usize,
-        /// The [`Status`] that the allocation returned.
-        status: Status,
-    },
-    /// An error ocurred when getting the name of the [`Entry`].
-    NameError(GetNameError),
-    /// An error ocurred while loading an [`EmbeddedEntry`][ee].
+    /// The name of the entry is out of bounds.
+    NameOutOfBounds,
+    /// The name of the entry was not valid utf8.
+    InvalidName(Utf8Error),
+    /// An allocation of memory to store an entry failed.
+    AllocationFailed,
+    /// An error occurred while loading an [`EmbeddedEntry`][ee]
     ///
     /// [ee]: config::EmbeddedEntry
-    Embedded(LoadEmbeddedEntryError),
-}
-
-impl From<GetNameError> for LoadEntryError {
-    fn from(value: GetNameError) -> Self {
-        Self::NameError(value)
-    }
+    EmbeddedError(LoadEmbeddedEntryError),
 }
 
 impl From<LoadEmbeddedEntryError> for LoadEntryError {
     fn from(value: LoadEmbeddedEntryError) -> Self {
-        Self::Embedded(value)
+        Self::EmbeddedError(value)
     }
 }
 
 impl fmt::Display for LoadEntryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AllocationFailed { page_count, status } => write!(
-                f,
-                "failed to allocate memory chunk of {page_count} pages: {status}"
-            ),
-            Self::NameError(error) => write!(f, "failed to get name: {error}"),
-            Self::Embedded(error) => write!(f, "error while parsing embedded entry: {error}"),
+            Self::NameOutOfBounds => write!(f, "name located out of bounds",),
+            Self::InvalidName(error) => write!(f, "invalid name: {error}",),
+            Self::AllocationFailed => write!(f, "an allocation failed",),
+            Self::EmbeddedError(error) => {
+                write!(f, "error ocurred while parsing embedded entry: {error}")
+            }
         }
     }
 }
 
 impl error::Error for LoadEntryError {}
 
-/// Various errors that can occur
+/// Various errors that can ocurr while loading an [`EmbeddedEntry`][ee]
+///
+/// [ee]: config::EmbeddedEntry
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadEmbeddedEntryError {
-    /// `capora-boot-stub` is missing an embedded section when an [`EmbeddedEntry`][ee] exists.
-    ///
-    /// [ee]: config::EmbeddedEntry
+    /// The embedded data section is missing.
     MissingEmbeddedSection,
-    /// The data referenced by the [`EmbeddedEntry`][ee] is located out of bounds.
-    ///
-    /// [ee]: config::EmbeddedEntry
+    /// The data to be loaded is out of bounds of the embedded data section.
     DataOutOfBounds,
 }
 
 impl fmt::Display for LoadEmbeddedEntryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingEmbeddedSection => f.write_str("embedded data section is missing"),
-            Self::DataOutOfBounds => f.write_str("data is located out of bounds"),
+            Self::MissingEmbeddedSection => write!(f, "embedded data section is missing"),
+            Self::DataOutOfBounds => write!(f, "data is located out of bounds"),
         }
     }
 }
 
-impl error::Error for LoadEmbeddedEntryError {}
-
-/// Retrives the name of the entry, checking for validity.
-pub fn get_name<'config>(
+/// Returns the necessary data to load an entry, including the size of the data, as well as its
+/// name and other data necessary to load the data.
+pub fn get_entry_data<'config>(
     configuration: Configuration<'config>,
     entry: Entry<'config>,
-) -> Result<&'config str, GetNameError> {
-    let (offset, length) = match entry {
-        Entry::Embedded(entry) => (entry.name_offset(), entry.name_length()),
-        Entry::BootFilesystem(entry) => (entry.name_offset(), entry.name_length()),
+) -> Result<(&'config str, usize, EntryData), LoadEntryError> {
+    let (name_offset, name_length, data_length, data) = match entry {
+        Entry::Embedded(entry) => (
+            entry.name_offset(),
+            entry.name_length(),
+            entry.data_length() as usize,
+            EntryData::Embedded {
+                data_offset: entry.data_offset() as usize,
+            },
+        ),
+        Entry::BootFilesystem(_) => todo!(),
         Entry::Unknown {
             entry_type: _,
             slice: _,
-        } => unreachable!("this should never be reached"),
+        } => unreachable!("unknown entry type should have already been caught"),
     };
 
-    let name_max = offset.checked_add(length);
-    if !name_max.is_some_and(|value| value as usize <= configuration.underlying_slice().len()) {
-        return Err(GetNameError::NameOutOfBounds);
-    }
+    let name_max = match name_offset.checked_add(name_length) {
+        Some(name_max) if (name_max as usize) <= configuration.underlying_slice().len() => name_max,
+        _ => return Err(LoadEntryError::NameOutOfBounds),
+    };
+    let name = core::str::from_utf8(
+        &configuration.underlying_slice()[name_offset as usize..name_max as usize],
+    )
+    .map_err(LoadEntryError::InvalidName)?;
 
-    core::str::from_utf8(&configuration.underlying_slice()[offset as usize..])
-        .map_err(GetNameError::Utf8Error)
+    Ok((name, data_length, data))
 }
 
-/// Various errors that can occur while getting the name of an [`Entry`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GetNameError {
-    /// The name is located out of bounds.
-    NameOutOfBounds,
-    /// The name failed to be parses as utf8.
-    Utf8Error(Utf8Error),
+/// Data necessary to loaded a module.
+pub enum EntryData {
+    /// Data necessary to load an embedded module.
+    Embedded {
+        /// The offset into the embedded data section at which the module should be loaded from.
+        data_offset: usize,
+    },
 }
-
-impl fmt::Display for GetNameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NameOutOfBounds => f.write_str("name located out of bounds"),
-            Self::Utf8Error(error) => write!(f, "name parsing error: {error}"),
-        }
-    }
-}
-
-impl error::Error for GetNameError {}
 
 /// Returns the base of the loaded image and the size of the image.
 pub fn get_image_data() -> Result<(*const u8, usize), GetImageDataError> {

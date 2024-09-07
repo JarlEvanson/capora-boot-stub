@@ -4,6 +4,7 @@
 #![no_main]
 #![feature(maybe_uninit_fill)]
 #![feature(array_chunks)]
+#![feature(maybe_uninit_write_slice)]
 
 use core::{
     arch::x86_64,
@@ -14,7 +15,9 @@ use core::{
 
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
-use mapper::{FrameRange, PageRange, VirtualMemoryMap, VirtualMemoryMapEntry};
+use mapper::{
+    ApplicationMemoryMap, FrameRange, PageRange, VirtualMemoryMap, VirtualMemoryMapEntry,
+};
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     proto::console::text,
@@ -54,7 +57,8 @@ fn main() -> Status {
     let _ =
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
 
-    let (application, entries) = match parse_and_interprete_configuration() {
+    let mut application_map = ApplicationMemoryMap::new();
+    let (application, entries) = match parse_and_interprete_configuration(&mut application_map) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
