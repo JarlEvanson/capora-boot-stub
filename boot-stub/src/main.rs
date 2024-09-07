@@ -5,6 +5,8 @@
 #![feature(maybe_uninit_fill)]
 #![feature(array_chunks)]
 #![feature(maybe_uninit_write_slice)]
+#![feature(maybe_uninit_slice)]
+#![feature(const_slice_flatten)]
 
 use core::{
     arch::x86_64,
@@ -16,10 +18,11 @@ use core::{
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
 use mapper::{
-    ApplicationMemoryMap, FrameRange, PageRange, VirtualMemoryMap, VirtualMemoryMapEntry,
+    ApplicationMemoryMap, FrameRange, PageRange, Protection, VirtualMemoryMap,
+    VirtualMemoryMapEntry,
 };
 use uefi::{
-    boot::{self, AllocateType, MemoryType},
+    boot,
     proto::console::text,
     system::{with_stderr, with_stdout},
     Status,
@@ -70,8 +73,7 @@ fn main() -> Status {
         };
     let _ = with_stdout(|stdout| writeln!(stdout, "Loaded {application_name}"));
 
-    let mut virtual_map = VirtualMemoryMap::new();
-    let entry_point = match load_application(&mut virtual_map, application_bytes) {
+    let entry_point = match load_application(&mut application_map, application_bytes) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -88,7 +90,7 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
 
-    let (stack, gdt, context_switch) = match setup_general_mappings(&mut virtual_map) {
+    let (stack, gdt, context_switch) = match setup_general_mappings(&mut application_map) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -98,7 +100,7 @@ fn main() -> Status {
         }
     };
 
-    let top_level_page = paging::map(virtual_map);
+    let top_level_page = paging::map_app(application_map);
     let memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
 
     // Already checked that the required bits are supported.
@@ -204,7 +206,7 @@ pub fn load_gdt(gdt: u64) {
 
     let gdtr = Gdtr {
         other: [MaybeUninit::uninit(); 6],
-        size: (mem::size_of_val(&GDT) - 1) as u16,
+        size: (GDT.len() - 1) as u16,
         offset: gdt,
     };
 
@@ -238,79 +240,56 @@ const CONTEXT_STUB_BYTES: [u8; 13] = [
     0xff, 0xe2, // jmp rdx
 ];
 
-const GDT: [u64; 3] = [
+const GDT: &[u8] = [
     // Null GDT entry.
-    0x00_0_0_00_000000_0000,
+    0x00_0_0_00_000000_0000u64.to_ne_bytes(),
     // Kernel code entry.
-    0x00_A_F_9B_000000_FFFF,
+    0x00_A_F_9B_000000_FFFFu64.to_ne_bytes(),
     // Kernel data entry.
-    0x00_C_F_93_000000_FFFF,
-];
+    0x00_C_F_93_000000_FFFFu64.to_ne_bytes(),
+]
+.as_flattened();
 
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
-    map: &mut VirtualMemoryMap,
+    application_map: &mut ApplicationMemoryMap,
 ) -> Result<(u64, u64, u64), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
-    let stack = boot::allocate_pages(
-        AllocateType::AnyPages,
-        MemoryType::LOADER_DATA,
-        stack_frame_count as usize,
+    let stack = application_map.allocate(stack_frame_count, Protection::Writable);
+    let stack_virtual_address = stack.page_range().virtual_address();
+
+    let miscellaneous_frames = boot::allocate_pages(
+        boot::AllocateType::AnyPages,
+        boot::MemoryType::LOADER_CODE,
+        1,
     )
-    .map_err(|error| SetupMappingsError::StackAllocationFailed {
-        frame_count: stack_frame_count,
-        status: error.status(),
-    })?;
-    let stack_frames = FrameRange::new((stack.as_ptr() as u64) >> 12, stack_frame_count)
-        .expect("broken page allocator");
-    let stack_pages = generate_random_supervisor_base(map, stack_frames, true, false);
-    let _ = with_stdout(|stdout| writeln!(stdout, "Stack frames: {stack_frames:X?}"));
+    .expect("failed to allocate miscellaneous frames");
+    let miscellaneous_pages =
+        PageRange::new((miscellaneous_frames.as_ptr() as u64) >> 12, 1).unwrap();
+    let miscellaneous_frames =
+        FrameRange::new((miscellaneous_frames.as_ptr() as u64) >> 12, 1).unwrap();
 
-    let gdt_context_switch =
-        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_CODE, 1).map_err(
-            |error| SetupMappingsError::GdtContextSwitchAllocationFailed {
-                status: error.status(),
-            },
-        )?;
-    let gdt_context_switch_frames = FrameRange::new((gdt_context_switch.as_ptr() as u64) >> 12, 1)
-        .expect("broken page allocator");
-    map.insert(
-        VirtualMemoryMapEntry::new(
-            PageRange::new((gdt_context_switch.as_ptr() as u64) >> 12, 1).unwrap(),
-            gdt_context_switch_frames,
-            false,
-            true,
-        )
-        .expect("broken page allocator"),
-    )
-    .expect("GDT context switch mapping failed");
-
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            GDT.as_ptr().cast::<u8>(),
-            gdt_context_switch.as_ptr(),
-            mem::size_of_val(&GDT),
-        )
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            CONTEXT_STUB_BYTES.as_ptr().cast::<u8>(),
-            gdt_context_switch.as_ptr().add(mem::size_of_val(&GDT)),
-            mem::size_of_val(&CONTEXT_STUB_BYTES),
-        )
-    }
-
-    let _ = with_stdout(|stdout| {
-        writeln!(
-            stdout,
-            "GDT + context switch frames: {gdt_context_switch_frames:X?}"
-        )
-    });
+    let miscellaneous_mapping = unsafe {
+        application_map
+            .add_region(
+                miscellaneous_pages,
+                miscellaneous_frames,
+                Protection::Executable,
+            )
+            .unwrap()
+    };
+    let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
+    MaybeUninit::copy_from_slice(&mut miscellaneous_mapping.as_bytes_mut()[..GDT.len()], GDT);
+    MaybeUninit::copy_from_slice(
+        &mut miscellaneous_mapping.as_bytes_mut()[GDT.len()..]
+            [..mem::size_of_val(&CONTEXT_STUB_BYTES)],
+        &CONTEXT_STUB_BYTES,
+    );
 
     Ok((
-        stack_pages.virtual_address() as u64,
-        gdt_context_switch.as_ptr() as u64,
-        gdt_context_switch.as_ptr() as u64 + mem::size_of_val(&GDT) as u64,
+        stack_virtual_address,
+        miscellaneous_virtual_address,
+        miscellaneous_virtual_address + GDT.len() as u64,
     ))
 }
 
