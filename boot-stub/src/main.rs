@@ -58,18 +58,20 @@ fn main() -> Status {
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
 
     let mut application_map = ApplicationMemoryMap::new();
-    let (application, entries) = match parse_and_interprete_configuration(&mut application_map) {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
-            let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
-            boot::stall(STALL_ON_ERROR_TIME);
-            return Status::LOAD_ERROR;
-        }
-    };
+    let (application_name, application_bytes, entries) =
+        match parse_and_interprete_configuration(&mut application_map) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
+                let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+                boot::stall(STALL_ON_ERROR_TIME);
+                return Status::LOAD_ERROR;
+            }
+        };
+    let _ = with_stdout(|stdout| writeln!(stdout, "Loaded {application_name}"));
 
     let mut virtual_map = VirtualMemoryMap::new();
-    let entry_point = match load_application(&mut virtual_map, application.data()) {
+    let entry_point = match load_application(&mut virtual_map, application_bytes) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -78,18 +80,6 @@ fn main() -> Status {
             return Status::LOAD_ERROR;
         }
     };
-    for entry in entries {
-        generate_random_supervisor_base(
-            &mut virtual_map,
-            FrameRange::new(
-                (entry.data().as_ptr() as u64) >> 12,
-                (entry.data().len() as u64) / 4096,
-            )
-            .unwrap(),
-            true,
-            false,
-        );
-    }
 
     if let Err(error) = test_required_bit_support() {
         let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));

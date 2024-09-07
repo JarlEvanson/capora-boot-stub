@@ -20,52 +20,10 @@ use uefi::{
 
 use crate::mapper::{ApplicationMemoryMap, Protection};
 
-/// A loaded [`Entry`].
-#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LoadedEntry {
-    /// A pointer to the utf8 encoded name of the loaded [`Entry`].
-    name: *const u8,
-    /// The length, in bytes, of [`LoadedEntry::name`].
-    name_length: usize,
-    /// The address of the loaded [`Entry`].
-    address: *const u8,
-    /// The size, in bytes, of the loaded [`Entry`].
-    size: usize,
-}
-
-impl LoadedEntry {
-    /// The name of the [`LoadedEntry`].
-    pub fn name(&self) -> &str {
-        let name_slice = unsafe { core::slice::from_raw_parts(self.name, self.name_length) };
-        unsafe { core::str::from_utf8_unchecked(name_slice) }
-    }
-
-    /// A slice of the bytes this [`LoadedEntry`] controls.
-    pub fn data(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.address, self.size) }
-    }
-
-    /// A mutable slice of the bytes this [`LoadedEntry`] controls.
-    pub fn data_mut(&mut self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.address.cast_mut(), self.size) }
-    }
-}
-
-impl fmt::Debug for LoadedEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug_struct = f.debug_struct("LoadedEntry");
-
-        debug_struct.field("name", &self.name());
-        debug_struct.field("data", &self.data());
-
-        debug_struct.finish()
-    }
-}
-
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(LoadedEntry, &'static mut [LoadedEntry]), ParseAndInterpretConfigurationError> {
+) -> Result<(&'static str, &'static [u8], u64), ParseAndInterpretConfigurationError> {
     let (config_section, embedded_section) = get_sections()?;
 
     // Acquire the [`Configuration`].
@@ -116,19 +74,12 @@ pub fn parse_and_interprete_configuration(
         )
     };
 
-    load_entry(embedded_section, application_bytes, application_data)
+    let application_bytes = load_entry(embedded_section, application_bytes, application_data)
         .map_err(ParseAndInterpretConfigurationError::LoadApplicationError)?;
-
-    let application = LoadedEntry {
-        name: application_name.as_ptr(),
-        name_length: application_name.len(),
-        address: application_bytes.as_ptr().cast::<u8>(),
-        size: application_size,
-    };
 
     let module_count = configuration.entry_count() - 1;
     if module_count == 0 {
-        return Ok((application, &mut []));
+        return Ok((application_name, application_bytes, 0));
     }
 
     let mut total_name_size = 0;
@@ -141,39 +92,38 @@ pub fn parse_and_interprete_configuration(
 
         total_name_size += length as usize;
     }
-    let total_loaded_entry_size = module_count as usize * mem::size_of::<LoadedEntry>();
-    let total_size = total_loaded_entry_size + total_name_size;
+    let total_module_entry_size = module_count as usize * mem::size_of::<boot_api::ModuleEntry>();
+    let total_size = total_module_entry_size + total_name_size;
 
-    let ptr = boot::allocate_pool(boot::MemoryType::LOADER_DATA, total_size)
-        .expect("allocation failed")
-        .as_ptr();
+    let module_memory_entry =
+        application_map.allocate(total_size.div_ceil(4096) as u64, Protection::Writable);
+    let module_virtual_address = module_memory_entry.page_range().virtual_address();
 
-    let loaded_entry_slice = {
-        let slice = unsafe {
-            core::slice::from_raw_parts_mut(
-                ptr.cast::<MaybeUninit<LoadedEntry>>(),
+    let (module_entry_slice, string_slice) = {
+        let module_memory_slice =
+            unsafe { &mut *(module_memory_entry.as_bytes_mut() as *mut [MaybeUninit<u8>]) };
+        let (module_entry_slice, string_slice) =
+            module_memory_slice.split_at_mut(total_module_entry_size);
+
+        let module_entry_slice = unsafe {
+            let slice = core::slice::from_raw_parts_mut(
+                module_entry_slice
+                    .as_mut_ptr()
+                    .cast::<MaybeUninit<boot_api::ModuleEntry>>(),
                 module_count as usize,
+            );
+            MaybeUninit::fill(
+                slice,
+                boot_api::ModuleEntry {
+                    name: ptr::null(),
+                    name_length: 0,
+                    address: ptr::null(),
+                    size: 0,
+                },
             )
         };
-        MaybeUninit::fill(
-            slice,
-            LoadedEntry {
-                name: ptr::null(),
-                name_length: 0,
-                address: ptr::null(),
-                size: 0,
-            },
-        )
-    };
-    let string_slice = {
-        let ptr = unsafe { ptr.add(total_loaded_entry_size) };
-        let slice = unsafe {
-            core::slice::from_raw_parts_mut(
-                ptr.cast::<core::mem::MaybeUninit<u8>>(),
-                total_name_size,
-            )
-        };
-        MaybeUninit::fill(slice, 0)
+
+        (module_entry_slice, MaybeUninit::fill(string_slice, 0))
     };
 
     let mut string_index = 0;
@@ -189,19 +139,20 @@ pub fn parse_and_interprete_configuration(
             |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
         )?;
 
-        let loaded_entry = LoadedEntry {
-            name: string_slice[string_index..].as_ptr(),
+        let loaded_entry = boot_api::ModuleEntry {
+            name: (module_virtual_address + (total_module_entry_size + string_index) as u64)
+                as *const u8,
             name_length: module_name.len(),
-            address: memory_entry.as_bytes().as_ptr().cast::<u8>(),
+            address: memory_entry.page_range().virtual_address() as *const u8,
             size: module_size,
         };
-        loaded_entry_slice[index] = loaded_entry;
+        module_entry_slice[index] = loaded_entry;
 
         string_slice[string_index..][..module_name.len()].copy_from_slice(module_name.as_bytes());
         string_index += module_name.len();
     }
 
-    Ok((application, loaded_entry_slice))
+    Ok((application_name, application_bytes, module_virtual_address))
 }
 
 /// Various errors that can occur while parsing and interpreting [`Configuration`].
