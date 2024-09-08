@@ -414,8 +414,6 @@ impl PageRange {
     /// Mask of the bits that a page number can occuy.
     pub const PAGE_MASK: u64 = ((1 << Self::PAGE_BITS) - 1) << Self::PAGE_OFFSET;
 
-    const SIZE_BITS: u8 = Self::ADDRESS_BITS - 12;
-
     /// Creates a new [`PageRange`], validating that the range fits within the maximum page number
     /// limits and that it doesn't cross the `x86_64` virtual boundary.
     pub fn new(page_number: u64, size: u64) -> Option<Self> {
@@ -470,8 +468,6 @@ impl FrameRange {
     const MAX_PHYS: u8 = 52;
     const MAX_FRAME: u64 = 1 << (Self::MAX_PHYS - 12);
 
-    const SIZE_BITS: u8 = Self::MAX_PHYS - 12;
-
     /// Creates a new [`FrameRange`], validating that the range fits within the maximum frame
     /// number limits.
     pub fn new(frame_number: u64, size: u64) -> Option<Self> {
@@ -495,5 +491,10 @@ impl FrameRange {
     /// The number of frames this [`FrameRange`] includes.
     pub const fn size(self) -> u64 {
         self.size
+    }
+
+    /// Checks if `frames` overlaps with `self`.
+    pub const fn overlaps(self, frames: FrameRange) -> bool {
+        self.frame() < frames.frame() + frames.size() && frames.frame() < self.frame() + self.size()
     }
 }
