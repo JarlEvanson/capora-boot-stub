@@ -16,7 +16,7 @@ use core::{
     ptr,
 };
 
-use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind};
+use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
 use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
@@ -121,6 +121,7 @@ fn main() -> Status {
         Protection::Writable,
         Usage::General,
     );
+    let memory_map_virtual_address = memory_map_region.page_range().virtual_address();
     let memory_map_region = unsafe {
         core::slice::from_raw_parts_mut(
             memory_map_region
@@ -228,6 +229,35 @@ fn main() -> Status {
     }
 
     let filled_memory_map = &mut memory_map_region[..index];
+
+    *response = BootloaderResponse {
+        bootloader_name: bootloader_name as *const u8,
+        bootloader_name_length,
+        bootloader_version: bootloader_version as *const u8,
+        bootloader_version_length,
+
+        kernel_virtual_address: slide as *const core::ffi::c_void,
+
+        memory_map_entries: memory_map_virtual_address as *mut MemoryMapEntry,
+        memory_map_entry_count: filled_memory_map.len(),
+
+        sm_bios_entry_32: ptr::null(), // TODO: Search for SM BIOS.
+        sm_bios_entry_64: ptr::null(), // TODO: Search for SM BIOS.
+
+        rsdp_table_ptr: ptr::null(), // TODO: Search for RSDP pointer in configuration tables.
+        uefi_system_table_ptr: uefi::table::system_table_raw()
+            .map(|ptr| ptr.as_ptr())
+            .unwrap_or(ptr::null_mut())
+            .cast::<core::ffi::c_void>(),
+
+        uefi_memory_map: ptr::null_mut(), // TODO: Allocate memory map, then copy to slice.
+        uefi_memory_map_size: memory_map.meta().map_size,
+        uefi_memory_map_descriptor_size: memory_map.meta().desc_size,
+        uefi_memory_map_descriptor_version: memory_map.meta().desc_version.into(),
+
+        module_entries: modules_virt_address as *mut ModuleEntry,
+        module_entry_count: module_count as usize,
+    };
 
     // Already checked that the required bits are supported.
     let _ = set_required_bits();
@@ -382,7 +412,7 @@ pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
 ) -> Result<
     (
-        &mut BootloaderResponse,
+        &'static mut BootloaderResponse,
         u64,
         u64,
         u64,
