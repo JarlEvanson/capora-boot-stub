@@ -16,12 +16,13 @@ use core::{
     ptr,
 };
 
-use boot_api::BootloaderResponse;
+use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind};
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
 use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
     boot,
+    mem::memory_map::{MemoryMap, MemoryMapMut},
     proto::console::text,
     system::{with_stderr, with_stdout},
     Status,
@@ -109,8 +110,124 @@ fn main() -> Status {
         }
     };
 
+    let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
+        .unwrap()
+        .len()
+        * 2
+        * mem::size_of::<MemoryMapEntry>();
+    let memory_map_region_page_count = memory_map_region_size.div_ceil(4096) as u64;
+    let memory_map_region = application_map.allocate(
+        memory_map_region_page_count,
+        Protection::Writable,
+        Usage::General,
+    );
+    let memory_map_region = unsafe {
+        core::slice::from_raw_parts_mut(
+            memory_map_region
+                .as_bytes_mut()
+                .as_mut_ptr()
+                .cast::<MaybeUninit<MemoryMapEntry>>(),
+            memory_map_region_size / mem::size_of::<MemoryMapEntry>(),
+        )
+    };
+    let memory_map_region = MaybeUninit::fill(
+        memory_map_region,
+        MemoryMapEntry {
+            kind: MemoryMapEntryKind::RESERVED,
+            base: 0,
+            size: 0,
+        },
+    );
+
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
-    let memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
+    let mut memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
+    memory_map.sort();
+
+    let mut index = 0;
+    let mut base = 0;
+    let mut size = 0;
+    let mut kind = MemoryMapEntryKind::RESERVED;
+    for entry in memory_map.entries().copied() {
+        let prev_end = base + size;
+
+        let entry_kind = match entry.ty {
+            boot::MemoryType::BOOT_SERVICES_CODE | boot::MemoryType::BOOT_SERVICES_DATA => {
+                MemoryMapEntryKind::USABLE
+            }
+            boot::MemoryType::ACPI_RECLAIM => MemoryMapEntryKind::ACPI_RECLAIMABLE,
+            boot::MemoryType::ACPI_NON_VOLATILE => MemoryMapEntryKind::ACPI_NONVOLATILE_STORAGE,
+            boot::MemoryType::UNACCEPTED => MemoryMapEntryKind::UNACCEPTED,
+            boot::MemoryType::CONVENTIONAL => MemoryMapEntryKind::USABLE,
+            boot::MemoryType::LOADER_DATA | boot::MemoryType::LOADER_CODE => {
+                MemoryMapEntryKind::BOOTLOADER
+            }
+            _ => MemoryMapEntryKind::RESERVED,
+        };
+        if entry.phys_start == prev_end && entry_kind == kind {
+            size += entry.page_count * 4096;
+            continue;
+        }
+
+        while size != 0 {
+            let entry = 'bootloader_test: {
+                if kind == MemoryMapEntryKind::BOOTLOADER {
+                    let frame_range = FrameRange::new(base / 4096, size / 4096).unwrap();
+
+                    let Some(min_key) = application_memory_entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.frame_range().overlaps(frame_range)
+                                && entry.usage() != Usage::General
+                        })
+                        .min_by_key(|e| e.frame())
+                    else {
+                        break 'bootloader_test MemoryMapEntry { kind, base, size };
+                    };
+
+                    let start_overlap = core::cmp::max(frame_range.frame(), min_key.frame());
+                    let end_overlap = core::cmp::min(
+                        frame_range.frame() + frame_range.size(),
+                        min_key.frame() + min_key.size(),
+                    );
+
+                    if base / 4096 < start_overlap {
+                        break 'bootloader_test MemoryMapEntry {
+                            kind,
+                            base,
+                            size: (start_overlap - base / 4096) * 4096,
+                        };
+                    }
+
+                    let kind = match min_key.usage() {
+                        Usage::General => MemoryMapEntryKind::BOOTLOADER,
+                        Usage::Application => MemoryMapEntryKind::KERNEL,
+                        Usage::Module => MemoryMapEntryKind::MODULE,
+                    };
+
+                    break 'bootloader_test MemoryMapEntry {
+                        kind,
+                        base,
+                        size: (end_overlap - start_overlap) * 4096,
+                    };
+                }
+
+                MemoryMapEntry { kind, base, size }
+            };
+
+            memory_map_region[index] = entry;
+
+            size -= entry.size;
+            base += entry.size;
+
+            index += 1;
+        }
+
+        base = entry.phys_start;
+        size = entry.page_count * 4096;
+        kind = entry_kind;
+    }
+
+    let filled_memory_map = &mut memory_map_region[..index];
 
     // Already checked that the required bits are supported.
     let _ = set_required_bits();
