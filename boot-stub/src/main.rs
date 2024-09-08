@@ -91,6 +91,7 @@ fn main() -> Status {
 
     let (
         response,
+        response_virtual_address,
         stack,
         gdt,
         context_switch,
@@ -123,6 +124,7 @@ fn main() -> Status {
             in("rax") top_level_page,
             in("rcx") stack.wrapping_add(LOADED_STACK_SIZE),
             in("rdx") entry_point,
+            in("rdi") response_virtual_address,
             options(noreturn)
         )
     }
@@ -268,6 +270,7 @@ pub fn setup_general_mappings(
         u64,
         u64,
         u64,
+        u64,
         usize,
         u64,
         usize,
@@ -365,6 +368,7 @@ pub fn setup_general_mappings(
 
     Ok((
         bootloader_response,
+        miscellaneous_virtual_address,
         stack_virtual_address,
         miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
         miscellaneous_virtual_address + (mem::size_of::<BootloaderResponse>() + GDT.len()) as u64,
