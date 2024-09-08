@@ -17,10 +17,7 @@ use core::{
 
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
-use mapper::{
-    ApplicationMemoryMap, FrameRange, PageRange, Protection, VirtualMemoryMap,
-    VirtualMemoryMapEntry,
-};
+use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection};
 use uefi::{
     boot,
     proto::console::text,
@@ -324,32 +321,6 @@ impl fmt::Display for SetupMappingsError {
                 f,
                 "allocation of 1 page for GDT and context switch failed with code {status}"
             ),
-        }
-    }
-}
-
-/// Generates a random address in the supervisor section of memory, marks it as to be mapped as
-/// writable or executable according to the passed objects, and then puts in into the
-/// [`VirtualMemoryMap`].
-pub fn generate_random_supervisor_base(
-    map: &mut VirtualMemoryMap,
-    frames: FrameRange,
-    writable: bool,
-    executable: bool,
-) -> PageRange {
-    loop {
-        let rng = load_application::rand_u64().expect("random number generator failed")
-            & PageRange::PAGE_MASK;
-        let Some(pages) = PageRange::new(rng, frames.size()) else {
-            continue;
-        };
-
-        let Some(entry) = VirtualMemoryMapEntry::new(pages, frames, writable, executable) else {
-            continue;
-        };
-
-        if map.insert(entry).is_some() {
-            return pages;
         }
     }
 }
