@@ -60,7 +60,7 @@ fn main() -> Status {
         with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
 
     let mut application_map = ApplicationMemoryMap::new();
-    let (application_name, application_bytes, entries) =
+    let (application_name, application_bytes, modules_virt_address, module_count) =
         match parse_and_interprete_configuration(&mut application_map) {
             Ok(result) => result,
             Err(error) => {

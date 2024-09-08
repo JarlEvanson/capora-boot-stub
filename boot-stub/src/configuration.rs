@@ -23,7 +23,7 @@ use crate::mapper::{ApplicationMemoryMap, Protection};
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&'static str, &'static [u8], u64), ParseAndInterpretConfigurationError> {
+) -> Result<(&'static str, &'static [u8], u64, u64), ParseAndInterpretConfigurationError> {
     let (config_section, embedded_section) = get_sections()?;
 
     // Acquire the [`Configuration`].
@@ -79,7 +79,7 @@ pub fn parse_and_interprete_configuration(
 
     let module_count = configuration.entry_count() - 1;
     if module_count == 0 {
-        return Ok((application_name, application_bytes, 0));
+        return Ok((application_name, application_bytes, 0, module_count));
     }
 
     let mut total_name_size = 0;
@@ -152,7 +152,12 @@ pub fn parse_and_interprete_configuration(
         string_index += module_name.len();
     }
 
-    Ok((application_name, application_bytes, module_virtual_address))
+    Ok((
+        application_name,
+        application_bytes,
+        module_virtual_address,
+        module_count,
+    ))
 }
 
 /// Various errors that can occur while parsing and interpreting [`Configuration`].
