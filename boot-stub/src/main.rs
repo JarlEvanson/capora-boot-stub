@@ -89,8 +89,16 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
 
-    let (response, stack, gdt, context_switch) = match setup_general_mappings(&mut application_map)
-    {
+    let (
+        response,
+        stack,
+        gdt,
+        context_switch,
+        bootloader_name,
+        bootloader_name_length,
+        bootloader_version,
+        bootloader_version_length,
+    ) = match setup_general_mappings(&mut application_map) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -253,13 +261,28 @@ const GDT: &[u8] = [
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&mut BootloaderResponse, u64, u64, u64), SetupMappingsError> {
+) -> Result<
+    (
+        &mut BootloaderResponse,
+        u64,
+        u64,
+        u64,
+        u64,
+        usize,
+        u64,
+        usize,
+    ),
+    SetupMappingsError,
+> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable);
     let stack_virtual_address = stack.page_range().virtual_address();
 
-    let miscellaneous_size =
-        mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len();
+    let miscellaneous_size = mem::size_of::<BootloaderResponse>()
+        + GDT.len()
+        + CONTEXT_STUB_BYTES.len()
+        + BOOTLOADER_NAME.len()
+        + BOOTLOADER_VERSION.len();
     let miscellaneous_page_count = miscellaneous_size.div_ceil(4096);
 
     let miscellaneous_frames = boot::allocate_pages(
@@ -300,6 +323,20 @@ pub fn setup_general_mappings(
             [..mem::size_of_val(&CONTEXT_STUB_BYTES)],
         &CONTEXT_STUB_BYTES,
     );
+    MaybeUninit::copy_from_slice(
+        &mut miscellaneous_mapping.as_bytes_mut()
+            [mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()..]
+            [..BOOTLOADER_NAME.len()],
+        BOOTLOADER_NAME.as_bytes(),
+    );
+    MaybeUninit::copy_from_slice(
+        &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()
+            + GDT.len()
+            + CONTEXT_STUB_BYTES.len()
+            + BOOTLOADER_NAME.len()..][..BOOTLOADER_VERSION.len()],
+        BOOTLOADER_VERSION.as_bytes(),
+    );
+
     let bootloader_response = unsafe {
         &mut *miscellaneous_mapping
             .as_bytes_mut()
@@ -331,6 +368,15 @@ pub fn setup_general_mappings(
         stack_virtual_address,
         miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
         miscellaneous_virtual_address + (mem::size_of::<BootloaderResponse>() + GDT.len()) as u64,
+        miscellaneous_virtual_address
+            + (mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()) as u64,
+        BOOTLOADER_NAME.len(),
+        miscellaneous_virtual_address
+            + (mem::size_of::<BootloaderResponse>()
+                + GDT.len()
+                + CONTEXT_STUB_BYTES.len()
+                + BOOTLOADER_NAME.len()) as u64,
+        BOOTLOADER_VERSION.len(),
     ))
 }
 
