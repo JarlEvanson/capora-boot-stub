@@ -26,7 +26,7 @@ use crate::{
 pub fn load_application(
     application_map: &mut ApplicationMemoryMap,
     slice: &[u8],
-) -> Result<u64, LoadApplicationError> {
+) -> Result<(u64, u64), LoadApplicationError> {
     let elf = elf::ElfFile::<Class64, LittleEndian>::parse(slice)?;
     let program_header_table = elf
         .program_header_table()
@@ -222,7 +222,7 @@ pub fn load_application(
         }
     }
 
-    Ok(slide + elf.header().entry())
+    Ok((slide, slide + elf.header().entry()))
 }
 
 /// Various errors that can occur while loading an application.

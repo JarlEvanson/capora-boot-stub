@@ -72,7 +72,7 @@ fn main() -> Status {
         };
     let _ = with_stdout(|stdout| writeln!(stdout, "Loaded {application_name}"));
 
-    let entry_point = match load_application(&mut application_map, application_bytes) {
+    let (slide, entry_point) = match load_application(&mut application_map, application_bytes) {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
