@@ -133,7 +133,7 @@ version = "0.1.0"
 [[package]]
 name = "elf"
 version = "0.1.0"
-source = "git+https://github.com/JarlEvanson/capora-elf.git#990466d1fb7013644e182b6aa8d3ec6b20a71001"
+source = "git+https://github.com/JarlEvanson/capora-elf.git?rev=a5977e37a33d6c92146b2fb4b8d48ae4ca77a6f7#a5977e37a33d6c92146b2fb4b8d48ae4ca77a6f7"
 
 [[package]]
 name = "errno"
