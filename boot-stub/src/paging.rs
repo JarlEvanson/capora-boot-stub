@@ -2,11 +2,11 @@
 
 use core::mem::{self, MaybeUninit};
 
-use crate::mapper::ApplicationMemoryMap;
+use crate::mapper::{ApplicationMemoryMap, Entry};
 
 /// Creates and allocates a full page table layout for the provided [`ApplicationMemoryMap`], returning
 /// the physical memory address to be loaded into the address space specifier.
-pub fn map_app(map: ApplicationMemoryMap) -> u64 {
+pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
     let mut pml4e_index = 512;
     let mut pml3e_index = 512;
     let mut pml2e_index = 512;
@@ -108,7 +108,9 @@ pub fn map_app(map: ApplicationMemoryMap) -> u64 {
         }
     }
 
-    pml4e_table.as_ptr() as u64
+    let entries = unsafe { core::mem::transmute::<&[Entry], &'static [Entry]>(map.as_slice()) };
+
+    (pml4e_table.as_ptr() as u64, entries)
 }
 
 fn get_pml1e_page_index(page: u64) -> u16 {

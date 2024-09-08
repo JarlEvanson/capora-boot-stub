@@ -109,7 +109,7 @@ fn main() -> Status {
         }
     };
 
-    let top_level_page = paging::map_app(application_map);
+    let (top_level_page, application_memory_entries) = paging::map_app(application_map);
     let memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
 
     // Already checked that the required bits are supported.
