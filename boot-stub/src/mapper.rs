@@ -29,7 +29,12 @@ impl ApplicationMemoryMap {
 
     /// Generates a random page to be the base of the region in virtual memory, marks it to be
     /// mapped according to `protection`, and allocates physical memory to back the allocation.
-    pub fn allocate(&mut self, page_count: u64, protection: Protection) -> &mut Entry {
+    pub fn allocate(
+        &mut self,
+        page_count: u64,
+        protection: Protection,
+        usage: Usage,
+    ) -> &mut Entry {
         let virtual_address = loop {
             let page = (rand_u64().expect("random number generator failed") & PageRange::PAGE_MASK)
                 | PageRange::EXTENDED_BIT_PAGE; // Enforce supervisor mode memory region.
@@ -38,7 +43,7 @@ impl ApplicationMemoryMap {
                 continue;
             };
 
-            match self.allocate_at(pages, protection) {
+            match self.allocate_at(pages, protection, usage) {
                 Some(entry) => break entry.page_range().virtual_address(),
                 None => continue,
             }
@@ -49,13 +54,19 @@ impl ApplicationMemoryMap {
 
     /// Marks the region at `pages` to be mapped according to `protection`, and allocates physical
     /// memory to back the page region.
-    pub fn allocate_at(&mut self, pages: PageRange, protection: Protection) -> Option<&mut Entry> {
+    pub fn allocate_at(
+        &mut self,
+        pages: PageRange,
+        protection: Protection,
+        usage: Usage,
+    ) -> Option<&mut Entry> {
         if protection == Protection::NotPresent {
             unsafe {
                 return self.add_region(
                     pages,
                     FrameRange::new(1, pages.size()).unwrap(),
                     protection,
+                    usage,
                 );
             };
         }
@@ -75,7 +86,7 @@ impl ApplicationMemoryMap {
         let frames = FrameRange::new((frames.as_ptr() as u64) >> 12, pages.size())
             .expect("memory allocation function failed");
 
-        unsafe { self.add_region(pages, frames, protection) }
+        unsafe { self.add_region(pages, frames, protection, usage) }
     }
 
     /// Adds the virtual region `pages` backed by the physical region `frames`.
@@ -90,9 +101,16 @@ impl ApplicationMemoryMap {
         pages: PageRange,
         frames: FrameRange,
         protection: Protection,
+        usage: Usage,
     ) -> Option<&mut Entry> {
         let index = self.check_add_reqs(pages, frames)?;
-        let entry = Entry::new(pages.page(), frames.frame(), pages.size(), protection);
+        let entry = Entry::new(
+            pages.page(),
+            frames.frame(),
+            pages.size(),
+            protection,
+            usage,
+        );
 
         if self.length == self.capacity {
             self.grow();
@@ -219,11 +237,11 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new(page: u64, frame: u64, size: u64, flags: Protection) -> Self {
+    fn new(page: u64, frame: u64, size: u64, flags: Protection, usage: Usage) -> Self {
         Self {
             page,
             frame,
-            size: size | ((flags as u64) << 62),
+            size: size | ((flags as u64) << 62) | ((usage as u64) << 60),
         }
     }
 
@@ -255,7 +273,7 @@ impl Entry {
 
     /// The number of pages this region covers.
     pub fn size(&self) -> u64 {
-        self.size & 0x3FFF_FFFF_FFFF_FFFF
+        self.size & 0x0FFF_FFFF_FFFF_FFFF
     }
 
     /// The settings on the virtual memory region when the application is loaded.
@@ -291,6 +309,16 @@ impl Entry {
         match self.protection() {
             Protection::Executable => true,
             _ => false,
+        }
+    }
+
+    /// The usage of this memory region.
+    pub fn usage(&self) -> Usage {
+        match (self.size >> 60) & 0b11 {
+            0 => Usage::General,
+            1 => Usage::Application,
+            2 => Usage::Module,
+            _ => unreachable!(),
         }
     }
 
@@ -337,6 +365,7 @@ impl fmt::Debug for Entry {
         debug_struct.field("frame", &self.frame());
         debug_struct.field("size", &self.size());
         debug_struct.field("protection", &self.protection());
+        debug_struct.field("usage", &self.usage());
 
         debug_struct.finish()
     }
@@ -353,6 +382,17 @@ pub enum Protection {
     Writable = 2,
     /// The virtual memory region should be readable and executable.
     Executable = 3,
+}
+
+/// The use for the memory region.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Usage {
+    /// The memory region's use is general.
+    General = 0,
+    /// The memory region is being used to store part of the application.
+    Application = 1,
+    /// The memory region is being used to store a module.
+    Module = 2,
 }
 
 /// A contiguous region of virtual memory.

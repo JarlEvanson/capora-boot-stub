@@ -18,7 +18,7 @@ use elf::{
 use uefi::system::with_stdout;
 
 use crate::{
-    mapper::{ApplicationMemoryMap, PageRange, Protection},
+    mapper::{ApplicationMemoryMap, PageRange, Protection, Usage},
     APPLICATION_REGION_SIZE, BASE_RETRY_COUNT, MINIMUM_APPLICATION_BASE,
 };
 
@@ -98,7 +98,7 @@ pub fn load_application(
                 };
 
                 let entry = application_map
-                    .allocate_at(page_range, protection)
+                    .allocate_at(page_range, protection, Usage::Application)
                     .ok_or(LoadApplicationError::OverlappingLoadSegments)?;
 
                 MaybeUninit::copy_from_slice(

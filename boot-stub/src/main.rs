@@ -19,7 +19,7 @@ use core::{
 use boot_api::BootloaderResponse;
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
-use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection};
+use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
     boot,
     proto::console::text,
@@ -278,7 +278,7 @@ pub fn setup_general_mappings(
     SetupMappingsError,
 > {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
-    let stack = application_map.allocate(stack_frame_count, Protection::Writable);
+    let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
     let stack_virtual_address = stack.page_range().virtual_address();
 
     let miscellaneous_size = mem::size_of::<BootloaderResponse>()
@@ -311,6 +311,7 @@ pub fn setup_general_mappings(
                 miscellaneous_pages,
                 miscellaneous_frames,
                 Protection::Executable,
+                Usage::General,
             )
             .unwrap()
     };

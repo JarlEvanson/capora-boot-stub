@@ -18,7 +18,7 @@ use uefi::{
     Status,
 };
 
-use crate::mapper::{ApplicationMemoryMap, Protection};
+use crate::mapper::{ApplicationMemoryMap, Protection, Usage};
 
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
@@ -95,8 +95,11 @@ pub fn parse_and_interprete_configuration(
     let total_module_entry_size = module_count as usize * mem::size_of::<boot_api::ModuleEntry>();
     let total_size = total_module_entry_size + total_name_size;
 
-    let module_memory_entry =
-        application_map.allocate(total_size.div_ceil(4096) as u64, Protection::Writable);
+    let module_memory_entry = application_map.allocate(
+        total_size.div_ceil(4096) as u64,
+        Protection::Writable,
+        Usage::General,
+    );
     let module_virtual_address = module_memory_entry.page_range().virtual_address();
 
     let (module_entry_slice, string_slice) = {
@@ -134,7 +137,11 @@ pub fn parse_and_interprete_configuration(
             )?;
         let module_page_count = module_size.div_ceil(4096);
 
-        let memory_entry = application_map.allocate(module_page_count as u64, Protection::Writable);
+        let memory_entry = application_map.allocate(
+            module_page_count as u64,
+            Protection::Writable,
+            Usage::Module,
+        );
         load_entry(embedded_section, memory_entry.as_bytes_mut(), module_data).map_err(
             |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
         )?;
