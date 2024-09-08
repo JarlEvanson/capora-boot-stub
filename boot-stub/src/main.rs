@@ -13,8 +13,10 @@ use core::{
     error,
     fmt::{self, Write},
     mem::{self, MaybeUninit},
+    ptr,
 };
 
+use boot_api::BootloaderResponse;
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
 use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection};
@@ -87,7 +89,8 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
 
-    let (stack, gdt, context_switch) = match setup_general_mappings(&mut application_map) {
+    let (response, stack, gdt, context_switch) = match setup_general_mappings(&mut application_map)
+    {
         Ok(result) => result,
         Err(error) => {
             let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
@@ -250,21 +253,31 @@ const GDT: &[u8] = [
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(u64, u64, u64), SetupMappingsError> {
+) -> Result<(&mut BootloaderResponse, u64, u64, u64), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable);
     let stack_virtual_address = stack.page_range().virtual_address();
 
+    let miscellaneous_size =
+        mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len();
+    let miscellaneous_page_count = miscellaneous_size.div_ceil(4096);
+
     let miscellaneous_frames = boot::allocate_pages(
         boot::AllocateType::AnyPages,
         boot::MemoryType::LOADER_CODE,
-        1,
+        miscellaneous_page_count,
     )
     .expect("failed to allocate miscellaneous frames");
-    let miscellaneous_pages =
-        PageRange::new((miscellaneous_frames.as_ptr() as u64) >> 12, 1).unwrap();
-    let miscellaneous_frames =
-        FrameRange::new((miscellaneous_frames.as_ptr() as u64) >> 12, 1).unwrap();
+    let miscellaneous_pages = PageRange::new(
+        (miscellaneous_frames.as_ptr() as u64) >> 12,
+        miscellaneous_page_count as u64,
+    )
+    .unwrap();
+    let miscellaneous_frames = FrameRange::new(
+        (miscellaneous_frames.as_ptr() as u64) >> 12,
+        miscellaneous_page_count as u64,
+    )
+    .unwrap();
 
     let miscellaneous_mapping = unsafe {
         application_map
@@ -276,17 +289,48 @@ pub fn setup_general_mappings(
             .unwrap()
     };
     let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
-    MaybeUninit::copy_from_slice(&mut miscellaneous_mapping.as_bytes_mut()[..GDT.len()], GDT);
     MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()[GDT.len()..]
+        &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
+            [..GDT.len()],
+        GDT,
+    );
+    MaybeUninit::copy_from_slice(
+        &mut miscellaneous_mapping.as_bytes_mut()
+            [mem::size_of::<BootloaderResponse>() + GDT.len()..]
             [..mem::size_of_val(&CONTEXT_STUB_BYTES)],
         &CONTEXT_STUB_BYTES,
     );
+    let bootloader_response = unsafe {
+        &mut *miscellaneous_mapping
+            .as_bytes_mut()
+            .as_mut_ptr()
+            .cast::<MaybeUninit<BootloaderResponse>>()
+    };
+    let bootloader_response = bootloader_response.write(BootloaderResponse {
+        bootloader_name: ptr::null(),
+        bootloader_name_length: 0,
+        bootloader_version: ptr::null(),
+        bootloader_version_length: 0,
+        kernel_virtual_address: ptr::null_mut(),
+        memory_map_entries: ptr::null_mut(),
+        memory_map_entry_count: 0,
+        sm_bios_entry_32: ptr::null(),
+        sm_bios_entry_64: ptr::null(),
+        rsdp_table_ptr: ptr::null(),
+        uefi_system_table_ptr: ptr::null(),
+        uefi_memory_map: ptr::null(),
+        uefi_memory_map_size: 0,
+        uefi_memory_map_descriptor_size: 0,
+        uefi_memory_map_descriptor_version: 0,
+        module_entries: ptr::null_mut(),
+        module_entry_count: 0,
+    });
 
     Ok((
+        bootloader_response,
         stack_virtual_address,
-        miscellaneous_virtual_address,
-        miscellaneous_virtual_address + GDT.len() as u64,
+        miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
+        miscellaneous_virtual_address + (mem::size_of::<BootloaderResponse>() + GDT.len()) as u64,
     ))
 }
 
