@@ -143,6 +143,10 @@ pub fn run(
     fat_drive_arg.push(fat_directory);
     cmd.arg("-drive").arg(fat_drive_arg);
 
+    cmd.args(["-debugcon", "file:run/x86_64/debugcon.txt"]);
+    cmd.args(["-serial", "file:run/x86_64/serial.txt"]);
+    cmd.args(["-D", "run/x86_64/logfile.txt"]);
+
     let status = cmd.status()?;
     if !status.success() {
         return Err(RunError::QemuError {
