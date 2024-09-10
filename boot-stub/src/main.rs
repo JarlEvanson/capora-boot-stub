@@ -144,6 +144,10 @@ fn main() -> Status {
 
     memory_map.sort();
 
+    for entry in application_memory_entries {
+        log::trace!("{entry:X?}");
+    }
+
     let mut index = 0;
     let mut base = 0;
     let mut size = 0;
@@ -230,6 +234,10 @@ fn main() -> Status {
 
     let filled_memory_map = &mut memory_map_region[..index];
 
+    for entry in filled_memory_map.iter() {
+        log::trace!("{entry:X?}");
+    }
+
     *response = BootloaderResponse {
         bootloader_name: bootloader_name as *const u8,
         bootloader_name_length,
@@ -263,6 +271,10 @@ fn main() -> Status {
     let _ = set_required_bits();
     load_gdt(gdt);
 
+    log::info!("Switching to application");
+    log::trace!("Context Switch: {:#X}", context_switch);
+    log::trace!("PML4E: {:#X}", top_level_page);
+    log::trace!("Stack Top: {:#X}", stack.wrapping_add(LOADED_STACK_SIZE));
     unsafe {
         core::arch::asm!(
             "cli",
