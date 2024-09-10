@@ -23,7 +23,6 @@ use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap, MemoryMapMut},
-    proto::console::text,
     system::{with_stderr, with_stdout},
     Status,
 };
@@ -57,38 +56,32 @@ const LOADED_STACK_SIZE: u64 = 64 * 1024;
 fn main() -> Status {
     logging::init_logging();
 
-    with_stdout(setup_output);
-    with_stderr(setup_output);
-
-    let _ =
-        with_stdout(|stdout| writeln!(stdout, "Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}"));
+    log::info!("Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}");
 
     let mut application_map = ApplicationMemoryMap::new();
     let (application_name, application_bytes, modules_virt_address, module_count) =
         match parse_and_interprete_configuration(&mut application_map) {
             Ok(result) => result,
             Err(error) => {
-                let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
-                let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+                log::error!("{error}");
                 boot::stall(STALL_ON_ERROR_TIME);
                 return Status::LOAD_ERROR;
             }
         };
-    let _ = with_stdout(|stdout| writeln!(stdout, "Loaded {application_name}"));
+    log::info!("Loaded {application_name}");
 
     let (slide, entry_point) = match load_application(&mut application_map, application_bytes) {
         Ok(result) => result,
         Err(error) => {
-            let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
-            let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+            log::error!("{error}");
             boot::stall(STALL_ON_ERROR_TIME);
             return Status::LOAD_ERROR;
         }
     };
+    log::debug!("Application loaded at {slide:#X}; Entry point at {entry_point:#X}");
 
     if let Err(error) = test_required_bit_support() {
-        let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
-        let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+        log::error!("{error}");
         boot::stall(STALL_ON_ERROR_TIME);
         return Status::LOAD_ERROR;
     }
@@ -106,8 +99,7 @@ fn main() -> Status {
     ) = match setup_general_mappings(&mut application_map) {
         Ok(result) => result,
         Err(error) => {
-            let _ = with_stderr(|stderr| writeln!(stderr, "{error}"));
-            let _ = with_stdout(|stdout| writeln!(stdout, "{error}"));
+            log::error!("{error}");
             boot::stall(STALL_ON_ERROR_TIME);
             return Status::LOAD_ERROR;
         }
@@ -144,6 +136,7 @@ fn main() -> Status {
     );
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
+    log::info!("Exiting boot services");
     let mut memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
     memory_map.sort();
 
@@ -277,29 +270,6 @@ fn main() -> Status {
             in("rdi") response_virtual_address,
             options(noreturn)
         )
-    }
-}
-
-/// Checks if the provided [`Output`][out] is in mode -1, and if so, searches for the mode with the
-/// most rows and attempts to set `output` to that mode.
-///
-/// Doesn't return errors because booting shouldn't break due to a logging error.
-///
-/// [out]: text::Output
-pub fn setup_output(output: &mut text::Output) {
-    let current_mode = output.current_mode();
-    match current_mode {
-        Ok(None) => {
-            let mode = output
-                .modes()
-                .max_by(|mode_0, mode_1| mode_0.rows().cmp(&mode_1.rows()))
-                .expect("according to the UEFI specification, at least one mode must be supported");
-
-            // Just ignore any errors, we can't report them and we shouldn't not continue due to
-            // missing output.
-            let _ = output.set_mode(mode);
-        }
-        Ok(Some(_)) | Err(_) => {}
     }
 }
 
