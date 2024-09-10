@@ -18,6 +18,7 @@ use core::{
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::parse_and_interprete_configuration;
 use load_application::load_application;
+use logging::setup_post_exit_logging;
 use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
     boot,
@@ -137,7 +138,10 @@ fn main() -> Status {
     log::debug!("PML4E located at {top_level_page:#X}");
 
     log::info!("Exiting boot services");
+    setup_post_exit_logging();
     let mut memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
+    log::info!("Exited boot services");
+
     memory_map.sort();
 
     let mut index = 0;
