@@ -241,7 +241,7 @@ impl Entry {
         Self {
             page,
             frame,
-            size: size | ((flags as u64) << 62) | ((usage as u64) << 60),
+            size: size | ((flags as u64) << 61) | ((usage as u64) << 59),
         }
     }
 
@@ -273,16 +273,17 @@ impl Entry {
 
     /// The number of pages this region covers.
     pub fn size(&self) -> u64 {
-        self.size & 0x0FFF_FFFF_FFFF_FFFF
+        self.size & 0x07FF_FFFF_FFFF_FFFF
     }
 
     /// The settings on the virtual memory region when the application is loaded.
     pub fn protection(&self) -> Protection {
-        match self.size >> 62 {
+        match self.size >> 61 {
             0 => Protection::NotPresent,
             1 => Protection::Readable,
             2 => Protection::Writable,
             3 => Protection::Executable,
+            4 => Protection::WritableExecutable,
             _ => unreachable!(),
         }
     }
@@ -299,6 +300,7 @@ impl Entry {
     pub fn writable(&self) -> bool {
         match self.protection() {
             Protection::Writable => true,
+            Protection::WritableExecutable => true,
             _ => false,
         }
     }
@@ -308,13 +310,14 @@ impl Entry {
     pub fn executable(&self) -> bool {
         match self.protection() {
             Protection::Executable => true,
+            Protection::WritableExecutable => true,
             _ => false,
         }
     }
 
     /// The usage of this memory region.
     pub fn usage(&self) -> Usage {
-        match (self.size >> 60) & 0b11 {
+        match (self.size >> 59) & 0b11 {
             0 => Usage::General,
             1 => Usage::Application,
             2 => Usage::Module,
@@ -382,6 +385,8 @@ pub enum Protection {
     Writable = 2,
     /// The virtual memory region should be readable and executable.
     Executable = 3,
+    /// The virtual memory region should be readable, writable, and executable.
+    WritableExecutable = 4,
 }
 
 /// The use for the memory region.

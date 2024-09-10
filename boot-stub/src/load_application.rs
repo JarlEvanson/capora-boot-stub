@@ -86,15 +86,19 @@ pub fn load_application(
                 let adjusted_page = (slide / 4096 + page_containing) & PageRange::PAGE_MASK;
                 let page_range =
                     PageRange::new(adjusted_page, page_count).expect("bounds checking failed");
-                let protection = if header.flags().0 & SegmentFlags::WRITE.0
-                    == SegmentFlags::WRITE.0
+
+                let protection;
+                if (header.flags().0 & SegmentFlags::WRITE.0 == SegmentFlags::WRITE.0)
+                    && (header.flags().0 & SegmentFlags::EXECUTE.0 == SegmentFlags::EXECUTE.0)
                 {
-                    Protection::Writable
+                    protection = Protection::WritableExecutable;
+                } else if header.flags().0 & SegmentFlags::WRITE.0 == SegmentFlags::WRITE.0 {
+                    protection = Protection::Writable;
                 } else if header.flags().0 & SegmentFlags::EXECUTE.0 == SegmentFlags::EXECUTE.0 {
-                    Protection::Executable
+                    protection = Protection::Executable;
                 } else {
-                    Protection::Readable
-                };
+                    protection = Protection::Readable;
+                }
 
                 let entry = application_map
                     .allocate_at(page_range, protection, Usage::Application)
