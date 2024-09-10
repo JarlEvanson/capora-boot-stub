@@ -10,8 +10,7 @@
 
 use core::{
     arch::x86_64,
-    error,
-    fmt::{self, Write},
+    error, fmt,
     mem::{self, MaybeUninit},
     ptr,
 };
@@ -23,7 +22,6 @@ use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap, MemoryMapMut},
-    system::{with_stderr, with_stdout},
     Status,
 };
 
@@ -136,6 +134,8 @@ fn main() -> Status {
     );
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
+    log::debug!("PML4E located at {top_level_page:#X}");
+
     log::info!("Exiting boot services");
     let mut memory_map = unsafe { boot::exit_boot_services(boot::MemoryType::LOADER_DATA) };
     memory_map.sort();
@@ -400,6 +400,7 @@ pub fn setup_general_mappings(
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
     let stack_virtual_address = stack.page_range().virtual_address();
+    log::debug!("Stack allocated at {stack_virtual_address:#X}");
 
     let miscellaneous_size = mem::size_of::<BootloaderResponse>()
         + GDT.len()
@@ -435,6 +436,10 @@ pub fn setup_general_mappings(
             )
             .unwrap()
     };
+    log::debug!(
+        "Miscellaneous mapping allocated at {:#X}",
+        miscellaneous_mapping.page_range().virtual_address()
+    );
     let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
@@ -543,10 +548,7 @@ impl fmt::Display for SetupMappingsError {
 #[cfg_attr(not(test), panic_handler)]
 #[cfg_attr(test, expect(dead_code))]
 fn panic_handler(info: &core::panic::PanicInfo) -> ! {
-    if uefi::table::system_table_boot().is_some() {
-        let _ = with_stderr(|stderr| writeln!(stderr, "{info}"));
-        let _ = with_stdout(|stdout| writeln!(stdout, "{info}"));
-    }
+    log::error!("PANIC OCCURRED: {info}");
 
     loop {
         core::hint::spin_loop()

@@ -142,6 +142,10 @@ pub fn parse_and_interprete_configuration(
             Protection::Writable,
             Usage::Module,
         );
+        log::debug!(
+            "Module {module_name} loaded at {:#X}",
+            memory_entry.page_range().virtual_address()
+        );
         load_entry(embedded_section, memory_entry.as_bytes_mut(), module_data).map_err(
             |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
         )?;

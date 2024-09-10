@@ -1,7 +1,7 @@
 //! Functionality that deals with loading an ELF file.
 
 use core::{
-    fmt::{self, Write},
+    fmt,
     mem::{self, MaybeUninit},
 };
 
@@ -15,7 +15,6 @@ use elf::{
     },
     ParseElfFileError,
 };
-use uefi::system::with_stdout;
 
 use crate::{
     mapper::{ApplicationMemoryMap, PageRange, Protection, Usage},
@@ -49,6 +48,7 @@ pub fn load_application(
             }
 
             let size = max_address - min_address;
+            log::trace!("Application load span: {size:#X}");
             if size > APPLICATION_REGION_SIZE {
                 return Err(LoadApplicationError::ApplicationTooLarge);
             }
@@ -62,7 +62,7 @@ pub fn load_application(
                         break 'slide_block;
                     }
                 }
-                let _ = with_stdout(|stdout| writeln!(stdout, "Warning: ASLR failed"));
+                log::warn!("ASLR failed");
                 slide = 0;
             }
             slide = (slide / max_alignment) * max_alignment;
@@ -72,7 +72,6 @@ pub fn load_application(
         }
         elf_type => return Err(LoadApplicationError::UnsupportedElfType(elf_type)),
     };
-    let _ = with_stdout(|stdout| writeln!(stdout, "Application Load Address: {slide:X}"));
 
     let mut request_found = false;
     for header in program_header_table.iter() {
@@ -100,6 +99,10 @@ pub fn load_application(
                 let entry = application_map
                     .allocate_at(page_range, protection, Usage::Application)
                     .ok_or(LoadApplicationError::OverlappingLoadSegments)?;
+                log::debug!(
+                    "Loading segment at {:#X} with permissions: {protection:?}",
+                    entry.page_range().virtual_address()
+                );
 
                 MaybeUninit::copy_from_slice(
                     &mut entry.as_bytes_mut()[..header.file_size() as usize],
@@ -107,6 +110,10 @@ pub fn load_application(
                         ..(header.file_offset() + header.file_size()) as usize],
                 );
                 if header.file_size() != header.memory_size() {
+                    log::trace!(
+                        "Filling segment segment with {} zero bytes",
+                        header.memory_size() - header.file_size()
+                    );
                     MaybeUninit::fill(&mut entry.as_bytes_mut()[header.file_size() as usize..], 0);
                 }
             }
@@ -137,12 +144,7 @@ pub fn load_application(
             | SegmentType::TLS
             | SegmentType::PHDR => {}
             segment_type => {
-                let _ = with_stdout(|stdout| {
-                    writeln!(
-                        stdout,
-                        "Warning: unrecognized segment type: {segment_type:?}"
-                    )
-                });
+                log::warn!("Unrecognized segment type: {segment_type:?}");
             }
         }
     }
@@ -155,6 +157,7 @@ pub fn load_application(
         .filter(|header| header.segment_type() == SegmentType::DYNAMIC)
     {
         use elf::raw::elf_dynamic::{Elf64Dynamic, Elf64DynamicTag, ElfDynamicTag};
+        log::debug!("Processing dynamic segement");
 
         let data = header.segment_data(elf).unwrap();
 
@@ -184,6 +187,8 @@ pub fn load_application(
         let rela_entry_size = rela_ent.ok_or(LoadApplicationError::MissingRelaEntrySize)?;
 
         let num_entries = rela_size / rela_entry_size;
+        log::debug!("Performing {num_entries} relocations specified at offset {rela_offset:#X}");
+
         for index in 0..num_entries {
             let memory_range = application_map
                 .lookup(slide + rela_offset)
