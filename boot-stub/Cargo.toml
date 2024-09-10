@@ -12,5 +12,6 @@ workspace = true
 [dependencies]
 boot-api.workspace = true
 config.workspace = true
+log = "0.4"
 elf = { git = "https://github.com/JarlEvanson/capora-elf.git", rev = "a5977e37a33d6c92146b2fb4b8d48ae4ca77a6f7" }
 uefi = { git = "https://github.com/rust-osdev/uefi-rs.git", rev = "9518cd1cbb19ba8e2165ee850ab2dfa319eb1a35" }

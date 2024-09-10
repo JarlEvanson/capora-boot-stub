@@ -30,6 +30,7 @@ use uefi::{
 
 pub mod configuration;
 pub mod load_application;
+pub mod logging;
 pub mod mapper;
 pub mod paging;
 
@@ -54,6 +55,8 @@ const LOADED_STACK_SIZE: u64 = 64 * 1024;
 
 #[uefi::entry]
 fn main() -> Status {
+    logging::init_logging();
+
     with_stdout(setup_output);
     with_stderr(setup_output);
 

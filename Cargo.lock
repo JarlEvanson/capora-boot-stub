@@ -75,6 +75,7 @@ dependencies = [
  "boot-api",
  "config",
  "elf",
+ "log",
  "uefi",
 ]
 
