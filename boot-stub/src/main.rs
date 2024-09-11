@@ -16,8 +16,8 @@ use core::{
 };
 
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
-use configuration::parse_and_interprete_configuration;
-use load_application::load_application;
+use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
+use load_application::{load_application, LoadApplicationError};
 use logging::setup_post_exit_logging;
 use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
 use uefi::{
@@ -52,48 +52,44 @@ const BASE_RETRY_COUNT: u64 = 1000;
 const LOADED_STACK_SIZE: u64 = 64 * 1024;
 
 #[uefi::entry]
-fn main() -> Status {
-    logging::init_logging();
-
-    log::info!("Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}");
-
-    let mut application_map = ApplicationMemoryMap::new();
-    let (application_name, application_bytes, modules_virt_address, module_count) =
-        match parse_and_interprete_configuration(&mut application_map) {
-            Ok(result) => result,
-            Err(error) => {
-                log::error!("{error}");
-                boot::stall(STALL_ON_ERROR_TIME);
-                return Status::LOAD_ERROR;
-            }
-        };
-    log::info!("Loaded {application_name}");
-
-    let (slide, entry_point) = match load_application(&mut application_map, application_bytes) {
-        Ok(result) => result,
+fn entry() -> Status {
+    let (context_switch, top_level_page_table, stack_top, entry_point, response) = match main() {
+        Ok(vars) => vars,
         Err(error) => {
             log::error!("{error}");
             boot::stall(STALL_ON_ERROR_TIME);
             return Status::LOAD_ERROR;
         }
     };
+
+    unsafe {
+        switch_to_application(
+            context_switch,
+            top_level_page_table,
+            stack_top,
+            entry_point,
+            response,
+        )
+    }
+}
+
+fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
+    logging::init_logging();
+
+    log::info!("Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}");
+
+    let mut application_map = ApplicationMemoryMap::new();
+    let (application_name, application_bytes, modules_virt_address, module_count) =
+        parse_and_interprete_configuration(&mut application_map)?;
+    log::info!("Loaded {application_name}");
+
+    let (slide, entry_point) = load_application(&mut application_map, application_bytes)?;
     log::debug!("Application loaded at {slide:#X}; Entry point at {entry_point:#X}");
 
-    if let Err(error) = test_required_bit_support() {
-        log::error!("{error}");
-        boot::stall(STALL_ON_ERROR_TIME);
-        return Status::LOAD_ERROR;
-    }
+    test_required_bit_support()?;
 
     let (response, response_virtual_address, stack, gdt, context_switch) =
-        match setup_general_mappings(&mut application_map) {
-            Ok(result) => result,
-            Err(error) => {
-                log::error!("{error}");
-                boot::stall(STALL_ON_ERROR_TIME);
-                return Status::LOAD_ERROR;
-            }
-        };
+        setup_general_mappings(&mut application_map)?;
 
     let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
         .unwrap()
@@ -229,6 +225,8 @@ fn main() -> Status {
         log::trace!("{entry:X?}");
     }
 
+    mem::forget(memory_map);
+
     response.kernel_virtual_address = slide as *const core::ffi::c_void;
 
     response.memory_map_entries = memory_map_virtual_address as *mut MemoryMapEntry;
@@ -250,20 +248,99 @@ fn main() -> Status {
     let _ = set_required_bits();
     load_gdt(gdt);
 
+    Ok((
+        context_switch,
+        top_level_page,
+        stack + LOADED_STACK_SIZE,
+        entry_point,
+        response_virtual_address,
+    ))
+}
+
+/// Various error that can occur during the execution of `capora-boot-stub`.
+pub enum BootloaderError {
+    /// The cpu does not supported some required features.
+    CpuFeatureError(UnsupportedFeaturesError),
+    /// An error ocurred while parsing and interpreting its configuration.
+    ParseAndInterpreteError(ParseAndInterpretConfigurationError),
+    /// An error ocurred while loading the application.
+    LoadApplicationError(LoadApplicationError),
+    /// An error occurred while setting up mappings.
+    SetupMappingsError(SetupMappingsError),
+}
+
+impl From<UnsupportedFeaturesError> for BootloaderError {
+    fn from(value: UnsupportedFeaturesError) -> Self {
+        Self::CpuFeatureError(value)
+    }
+}
+
+impl From<ParseAndInterpretConfigurationError> for BootloaderError {
+    fn from(value: ParseAndInterpretConfigurationError) -> Self {
+        Self::ParseAndInterpreteError(value)
+    }
+}
+
+impl From<LoadApplicationError> for BootloaderError {
+    fn from(value: LoadApplicationError) -> Self {
+        Self::LoadApplicationError(value)
+    }
+}
+
+impl From<SetupMappingsError> for BootloaderError {
+    fn from(value: SetupMappingsError) -> Self {
+        Self::SetupMappingsError(value)
+    }
+}
+
+impl fmt::Display for BootloaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CpuFeatureError(error) => {
+                write!(f, "cpu does not supported required feature: {error}")
+            }
+            Self::SetupMappingsError(error) => {
+                write!(f, "error allocating miscellaneous mappings: {error}")
+            }
+            Self::ParseAndInterpreteError(error) => write!(
+                f,
+                "error while parsing and interpreting configuration: {error}"
+            ),
+            Self::LoadApplicationError(error) => {
+                write!(f, "error while loading application: {error}")
+            }
+        }
+    }
+}
+
+/// Perfoms a context switch to the application.
+///
+/// # Safety
+/// `top_level_page_table` must point to the physical memory address of page table layout
+/// describing an address space that identity maps the context_switch, and `stack_top`,
+/// `entry_point`, and `response` must be properly setup when in the application address space.
+unsafe fn switch_to_application(
+    context_switch: u64,
+    top_level_page_table: u64,
+    stack_top: u64,
+    entry_point: u64,
+    response: u64,
+) -> ! {
     log::info!("Switching to application");
-    log::trace!("Context Switch: {:#X}", context_switch);
-    log::trace!("PML4E: {:#X}", top_level_page);
-    log::trace!("Stack Top: {:#X}", stack.wrapping_add(LOADED_STACK_SIZE));
+    log::trace!("Context Switch: {context_switch:#X}");
+    log::trace!("Top Level Page Table: {top_level_page_table:#X}");
+    log::trace!("Stack Top: {stack_top:#X}");
+    log::trace!("Entry Point: {entry_point:#X}");
     unsafe {
         core::arch::asm!(
             "cli",
             "jmp {context_switch}",
             context_switch = in(reg) context_switch,
-            in("rax") top_level_page,
-            in("rcx") stack.wrapping_add(LOADED_STACK_SIZE),
+            in("rax") top_level_page_table,
+            in("rcx") stack_top,
             in("rdx") entry_point,
-            in("rdi") response_virtual_address,
-            options(noreturn)
+            in("rdi") response,
+            options(noreturn, nostack)
         )
     }
 }
