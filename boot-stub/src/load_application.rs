@@ -56,8 +56,10 @@ pub fn load_application(
             let mut slide;
             'slide_block: {
                 for _ in 0..BASE_RETRY_COUNT {
-                    slide = rand_u64().ok_or(LoadApplicationError::RngFailure)?
-                        & !MINIMUM_APPLICATION_BASE;
+                    let Some(random_number) = rand_u64() else {
+                        break;
+                    };
+                    slide = random_number & !MINIMUM_APPLICATION_BASE;
                     if slide.checked_add(size).is_some() {
                         break 'slide_block;
                     }
@@ -244,8 +246,6 @@ pub enum LoadApplicationError {
     ApplicationTooLarge,
     /// The ELF application is of an unsuspported type.
     UnsupportedElfType(ElfType),
-    /// The rng failed.
-    RngFailure,
     /// [`SegmentType::LOAD`] virtual ranges overlap.
     OverlappingLoadSegments,
     /// The application is missing a boot request.
@@ -273,7 +273,6 @@ impl fmt::Display for LoadApplicationError {
             Self::UnsupportedElfType(elf_type) => {
                 write!(f, "elf is of unsupported type {elf_type:?}")
             }
-            Self::RngFailure => write!(f, "rng failed"),
             Self::OverlappingLoadSegments => write!(f, "overlapping load segments"),
             Self::UnuspportedApplicationRequest => {
                 write!(f, "missing or unsupported application boot request")
