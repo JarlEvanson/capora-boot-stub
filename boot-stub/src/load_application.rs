@@ -126,11 +126,12 @@ pub fn load_application(
             BOOTLOADER_REQUEST_SEGMENT_TYPE => {
                 let request = &slice[header.file_offset() as usize
                     ..(header.file_offset() + header.file_size()) as usize];
-                if !(request.len() <= mem::size_of::<BootloaderRequest>()) {
+                if !(mem::size_of::<BootloaderRequest>() <= request.len()) {
                     return Err(LoadApplicationError::UnuspportedApplicationRequest);
                 }
 
                 let mut array_chunks = request.array_chunks::<{ mem::size_of::<u64>() }>();
+
                 if !((&mut array_chunks)
                     .take(3)
                     .zip(boot_api::SIGNATURE)
