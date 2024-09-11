@@ -125,7 +125,7 @@ pub fn run(
             // Use vga graphics.
             cmd.args(["-vga", "std"]);
 
-            if std::env::consts::OS == "linux" {
+            if std::env::consts::OS == "linux" && false {
                 cmd.arg("-enable-kvm");
             }
         }
@@ -146,6 +146,8 @@ pub fn run(
     cmd.args(["-debugcon", "file:run/x86_64/debugcon.txt"]);
     cmd.args(["-serial", "file:run/x86_64/serial.txt"]);
     cmd.args(["-D", "run/x86_64/logfile.txt"]);
+    cmd.args(["-d", "int"]);
+    cmd.arg("-no-shutdown").arg("-no-reboot");
 
     cmd.args(["-monitor", "stdio"]);
 

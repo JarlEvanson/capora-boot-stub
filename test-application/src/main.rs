@@ -20,6 +20,12 @@ static mut BOOTLOADER_RESPONSE: *const BootloaderResponse = core::ptr::null();
 #[export_name = "_start"]
 pub fn entry(bootloader_response: *const BootloaderResponse) -> ! {
     unsafe {
+        core::arch::asm!(
+            "mov rax, [0x0]"
+        )
+    }
+
+    unsafe {
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!(BOOTLOADER_RESPONSE),
             bootloader_response,

@@ -270,6 +270,7 @@ impl error::Error for ParseAndInterpretConfigurationError {}
 /// Retrives the configuration section, and, if present, the embedded data section.
 fn get_sections() -> Result<(&'static [u8], Option<&'static [u8]>), GetSectionsError> {
     let (image_base, image_size) = get_image_data()?;
+    log::trace!("capora-boot-stub loaded at {:#X}", image_base as u64);
 
     let slice = unsafe { core::slice::from_raw_parts(image_base, image_size) };
     let section_header_table = section_header_table(&slice)?;

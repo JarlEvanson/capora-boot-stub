@@ -2,7 +2,7 @@
 
 use core::{
     fmt::Write,
-    mem::{self, MaybeUninit},
+    mem::{self, MaybeUninit}, sync::atomic::Ordering,
 };
 
 use log::Log;
@@ -69,6 +69,9 @@ fn init_serial_logger() {
     LOCK.unlock();
 }
 
+pub static PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static BUFFER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn init_graphical_logger() {
     let Ok(graphics_handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
         return;
@@ -106,6 +109,12 @@ fn init_graphical_logger() {
         )
     };
     let buffer = MaybeUninit::fill(buffer, BltPixel::new(0x00, 0x00, 0x00));
+
+    PTR.store(
+        graphics.frame_buffer().as_mut_ptr() as u64,
+        Ordering::Release,
+    );
+    BUFFER.store(buffer_size as u64, Ordering::Release);
 
     LOCK.lock();
 
