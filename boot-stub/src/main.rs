@@ -85,24 +85,15 @@ fn main() -> Status {
         return Status::LOAD_ERROR;
     }
 
-    let (
-        response,
-        response_virtual_address,
-        stack,
-        gdt,
-        context_switch,
-        bootloader_name,
-        bootloader_name_length,
-        bootloader_version,
-        bootloader_version_length,
-    ) = match setup_general_mappings(&mut application_map) {
-        Ok(result) => result,
-        Err(error) => {
-            log::error!("{error}");
-            boot::stall(STALL_ON_ERROR_TIME);
-            return Status::LOAD_ERROR;
-        }
-    };
+    let (response, response_virtual_address, stack, gdt, context_switch) =
+        match setup_general_mappings(&mut application_map) {
+            Ok(result) => result,
+            Err(error) => {
+                log::error!("{error}");
+                boot::stall(STALL_ON_ERROR_TIME);
+                return Status::LOAD_ERROR;
+            }
+        };
 
     let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
         .unwrap()
@@ -238,34 +229,22 @@ fn main() -> Status {
         log::trace!("{entry:X?}");
     }
 
-    *response = BootloaderResponse {
-        bootloader_name: bootloader_name as *const u8,
-        bootloader_name_length,
-        bootloader_version: bootloader_version as *const u8,
-        bootloader_version_length,
+    response.kernel_virtual_address = slide as *const core::ffi::c_void;
 
-        kernel_virtual_address: slide as *const core::ffi::c_void,
+    response.memory_map_entries = memory_map_virtual_address as *mut MemoryMapEntry;
+    response.memory_map_entry_count = filled_memory_map.len();
 
-        memory_map_entries: memory_map_virtual_address as *mut MemoryMapEntry,
-        memory_map_entry_count: filled_memory_map.len(),
+    response.uefi_system_table_ptr = uefi::table::system_table_raw()
+        .map(|ptr| ptr.as_ptr())
+        .unwrap_or(ptr::null_mut())
+        .cast::<core::ffi::c_void>();
 
-        sm_bios_entry_32: ptr::null(), // TODO: Search for SM BIOS.
-        sm_bios_entry_64: ptr::null(), // TODO: Search for SM BIOS.
+    response.module_entries = modules_virt_address as *mut ModuleEntry;
+    response.module_entry_count = module_count as usize;
 
-        rsdp_table_ptr: ptr::null(), // TODO: Search for RSDP pointer in configuration tables.
-        uefi_system_table_ptr: uefi::table::system_table_raw()
-            .map(|ptr| ptr.as_ptr())
-            .unwrap_or(ptr::null_mut())
-            .cast::<core::ffi::c_void>(),
-
-        uefi_memory_map: ptr::null_mut(), // TODO: Allocate memory map, then copy to slice.
-        uefi_memory_map_size: memory_map.meta().map_size,
-        uefi_memory_map_descriptor_size: memory_map.meta().desc_size,
-        uefi_memory_map_descriptor_version: memory_map.meta().desc_version.into(),
-
-        module_entries: modules_virt_address as *mut ModuleEntry,
-        module_entry_count: module_count as usize,
-    };
+    // TODO: Search for SM BIOS entries
+    // TODO: Search for RSDP pointer
+    // TODO: Allocate UEFI memory map
 
     // Already checked that the required bits are supported.
     let _ = set_required_bits();
@@ -399,20 +378,7 @@ const GDT: &[u8] = [
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<
-    (
-        &'static mut BootloaderResponse,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        usize,
-        u64,
-        usize,
-    ),
-    SetupMappingsError,
-> {
+) -> Result<(&'static mut BootloaderResponse, u64, u64, u64, u64), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
     let stack_virtual_address = stack.page_range().virtual_address();
@@ -489,10 +455,16 @@ pub fn setup_general_mappings(
             .cast::<MaybeUninit<BootloaderResponse>>()
     };
     let bootloader_response = bootloader_response.write(BootloaderResponse {
-        bootloader_name: ptr::null(),
-        bootloader_name_length: 0,
-        bootloader_version: ptr::null(),
-        bootloader_version_length: 0,
+        bootloader_name: (miscellaneous_virtual_address
+            + (mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()) as u64)
+            as *const u8,
+        bootloader_name_length: BOOTLOADER_NAME.len(),
+        bootloader_version: (miscellaneous_virtual_address
+            + (mem::size_of::<BootloaderResponse>()
+                + GDT.len()
+                + CONTEXT_STUB_BYTES.len()
+                + BOOTLOADER_NAME.len()) as u64) as *const u8,
+        bootloader_version_length: BOOTLOADER_VERSION.len(),
         kernel_virtual_address: ptr::null_mut(),
         memory_map_entries: ptr::null_mut(),
         memory_map_entry_count: 0,
@@ -514,15 +486,6 @@ pub fn setup_general_mappings(
         stack_virtual_address,
         miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
         miscellaneous_virtual_address + (mem::size_of::<BootloaderResponse>() + GDT.len()) as u64,
-        miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()) as u64,
-        BOOTLOADER_NAME.len(),
-        miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>()
-                + GDT.len()
-                + CONTEXT_STUB_BYTES.len()
-                + BOOTLOADER_NAME.len()) as u64,
-        BOOTLOADER_VERSION.len(),
     ))
 }
 
