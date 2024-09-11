@@ -89,6 +89,37 @@ impl ApplicationMemoryMap {
         unsafe { self.add_region(pages, frames, protection, usage) }
     }
 
+    /// Allocates a region of `page_frame_count` page frames from using the UEFI page allocator,
+    /// and marks the region of memory to be identity mapped.
+    pub fn allocate_identity(
+        &mut self,
+        page_frame_count: u64,
+        protection: Protection,
+        usage: Usage,
+    ) -> &mut Entry {
+        let mem_type = if protection == Protection::Executable {
+            boot::MemoryType::LOADER_CODE
+        } else {
+            boot::MemoryType::LOADER_DATA
+        };
+
+        let ptr = boot::allocate_pages(
+            boot::AllocateType::AnyPages,
+            mem_type,
+            page_frame_count as usize,
+        )
+        .expect("memory region allocation failed");
+        let pages = PageRange::new((ptr.as_ptr() as u64) >> 12, page_frame_count)
+            .expect("memory allocation function failed");
+        let frames = FrameRange::new((ptr.as_ptr() as u64) >> 12, page_frame_count)
+            .expect("memory allocation function failed");
+
+        unsafe {
+            self.add_region(pages, frames, protection, usage)
+                .expect("overlapping physical map")
+        }
+    }
+
     /// Adds the virtual region `pages` backed by the physical region `frames`.
     ///
     /// # Safety

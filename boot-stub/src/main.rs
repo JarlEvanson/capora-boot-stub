@@ -466,39 +466,18 @@ pub fn setup_general_mappings(
         + CONTEXT_STUB_BYTES.len()
         + BOOTLOADER_NAME.len()
         + BOOTLOADER_VERSION.len();
+
     let miscellaneous_page_count = miscellaneous_size.div_ceil(4096);
-
-    let miscellaneous_frames = boot::allocate_pages(
-        boot::AllocateType::AnyPages,
-        boot::MemoryType::LOADER_CODE,
-        miscellaneous_page_count,
-    )
-    .expect("failed to allocate miscellaneous frames");
-    let miscellaneous_pages = PageRange::new(
-        (miscellaneous_frames.as_ptr() as u64) >> 12,
+    let miscellaneous_mapping = application_map.allocate_identity(
         miscellaneous_page_count as u64,
-    )
-    .unwrap();
-    let miscellaneous_frames = FrameRange::new(
-        (miscellaneous_frames.as_ptr() as u64) >> 12,
-        miscellaneous_page_count as u64,
-    )
-    .unwrap();
-
-    let miscellaneous_mapping = unsafe {
-        application_map
-            .add_region(
-                miscellaneous_pages,
-                miscellaneous_frames,
-                Protection::Executable,
-                Usage::General,
-            )
-            .unwrap()
-    };
+        Protection::Executable,
+        Usage::General,
+    );
     log::debug!(
         "Miscellaneous mapping allocated at {:#X}",
         miscellaneous_mapping.page_range().virtual_address()
     );
+
     let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
