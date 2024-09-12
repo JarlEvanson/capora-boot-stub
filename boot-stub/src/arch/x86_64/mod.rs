@@ -14,6 +14,9 @@ const GDT: &[u8] = [
     0x00_A_F_9B_000000_FFFFu64.to_ne_bytes(),
     // Kernel data entry.
     0x00_C_F_93_000000_FFFFu64.to_ne_bytes(),
+    // TSS entry.
+    0x0u64.to_ne_bytes(),
+    0x0u64.to_ne_bytes(),
 ]
 .as_flattened();
 
@@ -21,6 +24,57 @@ const GDT: &[u8] = [
 pub fn create_architectural_structures(
     application_map: &mut ApplicationMemoryMap,
 ) -> Result<ArchitecturalStructures, CreateArchitecturalStructuresError> {
+    let interrupt_stack_entry = application_map.allocate_identity(1, Protection::Writable)?;
+    let interrupt_stack_address = interrupt_stack_entry.page_range().start_address();
+    log::debug!("Interrupt stack allocated at {interrupt_stack_address:?}");
+
+    let tss_entry = application_map.allocate_identity(1, Protection::Writable)?;
+    let tss_address = tss_entry.page_range().start_address();
+    let tss = [
+        // Reserved
+        0u32.to_ne_bytes(),
+        // RSP0
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // RSP1
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Rsp2
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Reserved
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 1
+        ((interrupt_stack_address.value() + 4096) as u32).to_ne_bytes(),
+        (((interrupt_stack_address.value() + 4096) >> 32) as u32).to_ne_bytes(),
+        // Ist 2
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 3
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 4
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 5
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 6
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Ist 7
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // Reserved
+        0u32.to_ne_bytes(),
+        0u32.to_ne_bytes(),
+        // IO base
+        (104u32 << 16).to_ne_bytes(),
+    ];
+    let tss: &[u8] = tss.as_flattened();
+    MaybeUninit::copy_from_slice(&mut tss_entry.as_slice().unwrap()[..tss.len()], tss);
+
     let allocation =
         application_map.allocate_identity(GDT.len().div_ceil(4096), Protection::Readable)?;
 
@@ -28,6 +82,29 @@ pub fn create_architectural_structures(
         .as_slice()
         .expect("bug in application memory map");
     MaybeUninit::copy_from_slice(&mut allocated_bytes[..GDT.len()], GDT);
+
+    let tss_descriptor = [
+        104,
+        0, // 16-bit limit
+        tss_address.value() as u8,
+        (tss_address.value() >> 8) as u8,  // 16-bit base address
+        (tss_address.value() >> 16) as u8, // 16-24 bit address
+        0xC9,
+        0x00,                              // Type, limit, flags
+        (tss_address.value() >> 24) as u8, // 24-32 address
+        (tss_address.value() >> 32) as u8,
+        (tss_address.value() >> 40) as u8, // 32-48 bit address
+        (tss_address.value() >> 48) as u8,
+        (tss_address.value() >> 56) as u8, // 48-64 bit address
+        0,
+        0,
+        0,
+        0,
+    ];
+    MaybeUninit::copy_from_slice(
+        &mut allocated_bytes[GDT.len() - 16..GDT.len()],
+        &tss_descriptor,
+    );
 
     Ok(ArchitecturalStructures {
         gdt: allocation.page_range().start_address(),
@@ -89,6 +166,8 @@ pub fn load_architecture_structures(data: ArchitecturalStructures) {
             "mov fs, ax",
             "mov gs, ax",
             "mov ss, ax",
+            "mov ax, 0x18",
+            "ltr ax",
             inout("rax") &gdtr.size => _,
         )
     }

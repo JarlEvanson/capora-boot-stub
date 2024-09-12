@@ -11,7 +11,10 @@ handler:
     mov r13, 128
     mov r12, 0
 
+a:
     mov rdx, cr2
+    mov rax, 0
+    mov cr2, rax
 
 print_loop: ; 16 digits
     cmp r13, 0
