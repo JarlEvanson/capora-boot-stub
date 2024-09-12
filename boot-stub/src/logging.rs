@@ -2,7 +2,8 @@
 
 use core::{
     fmt::Write,
-    mem::{self, MaybeUninit}, sync::atomic::Ordering,
+    mem::{self, MaybeUninit},
+    sync::atomic::Ordering,
 };
 
 use log::Log;
@@ -31,6 +32,8 @@ pub fn init_logging() {
 
     log::set_logger(&Logger).unwrap();
     log::set_max_level(log::LevelFilter::Trace);
+
+    log::trace!("FONT: {}x{}", FONT.glyph_width, FONT.glyph_height);
 }
 
 fn init_console_logger() {
@@ -71,6 +74,7 @@ fn init_serial_logger() {
 
 pub static PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static BUFFER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static STRIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn init_graphical_logger() {
     let Ok(graphics_handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
@@ -115,6 +119,7 @@ fn init_graphical_logger() {
         Ordering::Release,
     );
     BUFFER.store(buffer_size as u64, Ordering::Release);
+    STRIDE.store(mode.info().stride() as u64, Ordering::Release);
 
     LOCK.lock();
 
@@ -258,11 +263,10 @@ enum Graphics {
     Exited(ExitedGraphics),
 }
 
-const FONT: simple_psf::Psf =
-    match simple_psf::Psf::parse(include_bytes!("../assets/Tamzen7x13.psf")) {
-        Ok(font) => font,
-        Err(_) => panic!(),
-    };
+const FONT: simple_psf::Psf = match simple_psf::Psf::parse(include_bytes!("../assets/bizcat.psf")) {
+    Ok(font) => font,
+    Err(_) => panic!(),
+};
 
 struct BootServicesGraphics {
     proto: ScopedProtocol<GraphicsOutput>,

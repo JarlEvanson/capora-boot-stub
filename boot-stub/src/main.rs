@@ -9,6 +9,7 @@
 #![feature(const_slice_flatten)]
 #![feature(unsafe_cell_from_mut)]
 #![feature(iter_map_windows)]
+#![feature(concat_bytes)]
 
 use core::{
     fmt,
@@ -132,16 +133,31 @@ fn main() -> Result<
     let context_switch = setup_context_switch(&mut application_map)?;
 
     let idt_virtual_address = {
-        const HANDLER_BYTES: &[u8] = &[
-            0xB8, 0xFF, 0x00, 0x00, 0x00, // mov eax, 0xFF
-            0x48, 0x8b, 0x3d, 0x0b, 0x00, 0x00, 0x00, // mov rdi,
-            0x48, 0x8b, 0x0d, 0x0c, 0x00, 0x00, 0x00, // mov rcx
-            0xf3, 0xab, // rep stosd
-            0xEB, 0xFE, // jmp $
-        ];
+        const HANDLER_BYTES: &[u8] = include_bytes!("handler.bin");
+        const FONT_BYTES: &[u8] = concat_bytes!(
+            include_bytes!("../assets/0.bin"),
+            include_bytes!("../assets/1.bin"),
+            include_bytes!("../assets/2.bin"),
+            include_bytes!("../assets/3.bin"),
+            include_bytes!("../assets/4.bin"),
+            include_bytes!("../assets/5.bin"),
+            include_bytes!("../assets/6.bin"),
+            include_bytes!("../assets/7.bin"),
+            include_bytes!("../assets/8.bin"),
+            include_bytes!("../assets/9.bin"),
+            include_bytes!("../assets/A.bin"),
+            include_bytes!("../assets/B.bin"),
+            include_bytes!("../assets/C.bin"),
+            include_bytes!("../assets/D.bin"),
+            include_bytes!("../assets/E.bin"),
+            include_bytes!("../assets/F.bin"),
+        );
 
         let handler_entry = application_map
-            .allocate_identity(1, Protection::Executable)
+            .allocate_identity(
+                (HANDLER_BYTES.len() + 24 + FONT_BYTES.len()).div_ceil(4096),
+                Protection::Executable,
+            )
             .unwrap();
         let handler_virtual_address = handler_entry.page_range().start_address();
         log::debug!("Handler page allocated at {handler_virtual_address:?}");
@@ -151,6 +167,7 @@ fn main() -> Result<
         );
         let ptr = logging::PTR.load(core::sync::atomic::Ordering::Acquire);
         let size = logging::BUFFER.load(core::sync::atomic::Ordering::Acquire);
+        let stride = logging::STRIDE.load(core::sync::atomic::Ordering::Acquire);
         MaybeUninit::copy_from_slice(
             &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len()..][..8],
             &ptr.to_ne_bytes(),
@@ -158,6 +175,14 @@ fn main() -> Result<
         MaybeUninit::copy_from_slice(
             &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 8..][..8],
             &(size / 4).to_ne_bytes(),
+        );
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 16..][..8],
+            &stride.to_ne_bytes(),
+        );
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 24..][..FONT_BYTES.len()],
+            FONT_BYTES,
         );
 
         let start_virtual_address =
@@ -171,16 +196,22 @@ fn main() -> Result<
             Frame::containing_address(PhysicalAddress::new_masked(ptr + size));
         let frames = FrameRange::inclusive_range(start_physical_address, end_physical_address);
 
-        unsafe {
-            application_map.add_entry(
-                pages,
-                BackingMemory::Unallocated {
-                    frame_range: frames,
-                    protection: Protection::Writable,
-                    usage: Usage::Framebuffer,
-                },
-            ).unwrap();
-        }
+        let framebuffer_entry = unsafe {
+            application_map
+                .add_entry(
+                    pages,
+                    BackingMemory::Unallocated {
+                        frame_range: frames,
+                        protection: Protection::Writable,
+                        usage: Usage::Framebuffer,
+                    },
+                )
+                .unwrap()
+        };
+        log::debug!(
+            "Framebuffer entry: {:?}",
+            framebuffer_entry.page_range().start_address()
+        );
 
         let idt_entry = application_map
             .allocate_identity(1, Protection::Writable)
