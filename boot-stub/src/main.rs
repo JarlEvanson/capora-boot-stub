@@ -230,7 +230,7 @@ fn main() -> Result<
         unsafe {
             options.set_code_selector(SegmentSelector::new(1, x86_64::PrivilegeLevel::Ring0))
         };
-    unsafe { options.set_stack_index(0) };
+        unsafe { options.set_stack_index(0) };
         idt.write(idt_table);
 
         idt_virtual_address
