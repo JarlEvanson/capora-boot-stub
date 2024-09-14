@@ -112,8 +112,9 @@ impl<T> Spinlock<T> {
 impl<T: ?Sized> Spinlock<T> {
     /// Acquires a mutex, spinning until it is able to do so.
     ///
-    /// This function will spin until it is available to acquire the mutex. Upon returning, the context is the
-    /// only context with the lock held. A RAII guard is returned to allow scoped unlock of the lock.
+    /// This function will spin until it is available to acquire the mutex. Upon returning, the
+    /// the context is the only context with the lock held. A RAII guard is returned to allow
+    /// scoped unlock of the lock.
     pub fn lock(&self) -> SpinlockGuard<T> {
         self.lock.lock();
 
@@ -122,13 +123,14 @@ impl<T: ?Sized> Spinlock<T> {
 
     /// Attempts to acquire this lock.
     ///
-    /// If the lock could not be acquire at this time, then [`Err`] is returned. Otherwise, a RAII guard is returned.
-    /// The lock will be unlocked when the guard is dropped.
+    /// If the lock could not be acquired at this time, then [`Err`] is returned. Otherwise, a RAII
+    /// guard is returned. The lock will be unlocked when the guard is dropped.
     ///
     /// This function does not block.
     ///
     /// # Errors
-    /// If the [`Spinlock`] could not be acquire because it is already locked, then this call will return an [`Err`].
+    /// If the [`Spinlock`] could not be acquire because it is already locked, then this call will
+    /// return an [`Err`].
     pub fn try_lock(&self) -> Result<SpinlockGuard<T>, SpinlockAcquisitionError> {
         self.lock.try_lock().map(|()| SpinlockGuard { mutex: self })
     }
@@ -148,9 +150,10 @@ impl<T: ?Sized> Spinlock<T> {
 }
 
 /// A RAII implementation of a "scoped lock" of a [`Spinlock`]. When this structure is dropped, the
-/// lock will be unlcoked.
+/// lock will be unlocked.
 ///
-/// The data protected by the mutex can be access through this guard via its [`Deref`] and [`DerefMut`] implementations.
+/// The data protected by the mutex can be accessed through this guard via its [`Deref`] and
+/// [`DerefMut`] implementations.
 ///
 /// This structure is created by the [`Spinlock::lock()`] and [`Spinlock::try_lock()`] methods.
 pub struct SpinlockGuard<'a, T: ?Sized> {
