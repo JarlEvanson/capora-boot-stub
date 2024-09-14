@@ -118,7 +118,10 @@ impl<T: ?Sized> Spinlock<T> {
     pub fn lock(&self) -> SpinlockGuard<T> {
         self.lock.lock();
 
-        SpinlockGuard { mutex: self }
+        SpinlockGuard {
+            lock: &self.lock,
+            value: &self.value,
+        }
     }
 
     /// Attempts to acquire this lock.
@@ -132,12 +135,15 @@ impl<T: ?Sized> Spinlock<T> {
     /// If the [`Spinlock`] could not be acquire because it is already locked, then this call will
     /// return an [`Err`].
     pub fn try_lock(&self) -> Result<SpinlockGuard<T>, SpinlockAcquisitionError> {
-        self.lock.try_lock().map(|()| SpinlockGuard { mutex: self })
+        self.lock.try_lock().map(|()| SpinlockGuard {
+            lock: &self.lock,
+            value: &self.value,
+        })
     }
 
     /// Method that makes unlocking a mutex more explicit.
     pub fn unlock(guard: SpinlockGuard<T>) {
-        guard.mutex.lock.unlock()
+        guard.lock.unlock()
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -157,15 +163,27 @@ impl<T: ?Sized> Spinlock<T> {
 ///
 /// This structure is created by the [`Spinlock::lock()`] and [`Spinlock::try_lock()`] methods.
 pub struct SpinlockGuard<'a, T: ?Sized> {
-    /// The spinlock with which this [`SpinlockGuard`] is associated
-    mutex: &'a Spinlock<T>,
+    lock: &'a RawSpinlock,
+    value: &'a UnsafeCell<T>,
+}
+
+impl<'a, T: ?Sized> SpinlockGuard<'a, T> {
+    /// Returns a new [`SpinlockGuard`] that allows for safe access to `value`.
+    ///
+    /// # Safety
+    /// - `lock` must be locked.
+    /// - `value` must be safe to return immutable or mutable references to until `lock` is
+    ///     unlocked.
+    pub unsafe fn new(lock: &'a RawSpinlock, value: &'a UnsafeCell<T>) -> Self {
+        Self { lock, value }
+    }
 }
 
 impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        let value_ptr = self.mutex.value.get();
+        let value_ptr = self.value.get();
 
         // SAFETY:
         // We have exclusive access to the value pointed to by `value_ptr`.
@@ -175,7 +193,7 @@ impl<T: ?Sized> Deref for SpinlockGuard<'_, T> {
 
 impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        let value_ptr = self.mutex.value.get();
+        let value_ptr = self.value.get();
 
         // SAFETY:
         // We have exclusive access to the value pointed to by `value_ptr`.
@@ -185,7 +203,7 @@ impl<T: ?Sized> DerefMut for SpinlockGuard<'_, T> {
 
 impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
     fn drop(&mut self) {
-        self.mutex.lock.unlock();
+        self.lock.unlock();
     }
 }
 
@@ -195,7 +213,7 @@ pub struct SpinlockAcquisitionError;
 
 impl fmt::Display for SpinlockAcquisitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("try_lcok failed because operation would block")
+        f.pad("try_lock failed because operation would block")
     }
 }
 
