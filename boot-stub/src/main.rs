@@ -30,6 +30,7 @@ pub mod configuration;
 pub mod load_application;
 pub mod logging;
 pub mod mapper;
+pub mod memory_structs;
 pub mod paging;
 pub mod spinlock;
 
