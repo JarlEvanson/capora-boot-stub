@@ -31,6 +31,7 @@ pub mod load_application;
 pub mod logging;
 pub mod mapper;
 pub mod paging;
+pub mod spinlock;
 
 /// The name of this bootloader.
 const BOOTLOADER_NAME: &str = "capora-boot-stub";
