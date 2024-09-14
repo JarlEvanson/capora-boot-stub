@@ -3,7 +3,6 @@
 use core::{
     fmt::Write,
     mem::{self, MaybeUninit},
-    sync::atomic::{AtomicBool, Ordering},
 };
 
 use log::Log;
@@ -17,7 +16,9 @@ use uefi::{
     system::{with_stderr, with_stdout},
 };
 
-static LOCK: AtomicBool = AtomicBool::new(false);
+use crate::spinlock::RawSpinlock;
+
+static LOCK: RawSpinlock = RawSpinlock::new();
 
 static mut SERIAL: Option<ScopedProtocol<Serial>> = None;
 static mut GRAPHICS: Graphics = Graphics::Uninitialized;
@@ -61,11 +62,11 @@ fn init_serial_logger() {
         return;
     };
 
-    while LOCK.swap(true, Ordering::Acquire) {}
+    LOCK.lock();
 
     unsafe { SERIAL = Some(serial) }
 
-    LOCK.store(false, Ordering::Release);
+    LOCK.unlock();
 }
 
 fn init_graphical_logger() {
@@ -106,7 +107,7 @@ fn init_graphical_logger() {
     };
     let buffer = MaybeUninit::fill(buffer, BltPixel::new(0x00, 0x00, 0x00));
 
-    while LOCK.swap(true, Ordering::Acquire) {}
+    LOCK.lock();
 
     let (width, height) = graphics.current_mode_info().resolution();
     let stride = graphics.current_mode_info().stride();
@@ -127,17 +128,17 @@ fn init_graphical_logger() {
         })
     }
 
-    LOCK.store(false, Ordering::Release);
+    LOCK.unlock();
 }
 
 /// Sets up logging mechansims for after exiting boot services.
 pub fn setup_post_exit_logging() {
-    while LOCK.swap(true, Ordering::Acquire) {}
+    LOCK.lock();
 
     unsafe { SERIAL = None }
     unsafe { GRAPHICS = setup_post_exit_graphical_logger() }
 
-    LOCK.store(false, Ordering::Release);
+    LOCK.unlock();
 }
 
 fn setup_post_exit_graphical_logger() -> Graphics {
@@ -190,7 +191,7 @@ impl Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        while LOCK.swap(true, Ordering::Acquire) {}
+        LOCK.lock();
 
         log_serial(record);
         log_framebuffer(record);
@@ -200,7 +201,7 @@ impl Log for Logger {
                 with_stdout(|stdout| writeln!(stdout, "[{:?}] {}", record.level(), record.args()));
         }
 
-        LOCK.store(false, Ordering::Release);
+        LOCK.unlock();
     }
 
     fn flush(&self) {}
