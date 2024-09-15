@@ -130,3 +130,34 @@ impl fmt::Display for UnsupportedFeaturesError {
         }
     }
 }
+
+/// Jumps to the context switch for the application.
+///
+/// # Safety
+/// - The architectural structures must have been loaded.
+/// - `context_switch` must point to the virtual address of a identity mapped context switch
+///     routine.
+/// - `top_level_page_table` must point to a properly set up paging structure.
+/// - `stack_top` must be the virtual address of the top of a writable stack.
+/// - `entry_point` must point to the entry point of the application.
+/// - `bootloader_response` must be the virtual address of the bootloader response.
+pub unsafe fn jump_to_context_switch(
+    context_switch: u64,
+    top_level_page_table: u64,
+    stack_top: u64,
+    entry_point: u64,
+    bootloader_response: u64,
+) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "jmp {context_switch}",
+            context_switch = in(reg) context_switch,
+            in("rax") top_level_page_table,
+            in("rcx") stack_top,
+            in("rdx") entry_point,
+            in("rdi") bootloader_response,
+            options(noreturn, nostack)
+        )
+    }
+}

@@ -17,9 +17,9 @@ use core::{
 };
 
 use arch::x86_64::{
-    create_architectural_structures, enable_required_features, load_architecture_structures,
-    test_required_feature_support, ArchitecturalStructures, CreateArchitecturalStructuresError,
-    UnsupportedFeaturesError,
+    create_architectural_structures, enable_required_features, jump_to_context_switch,
+    load_architecture_structures, test_required_feature_support, ArchitecturalStructures,
+    CreateArchitecturalStructuresError, UnsupportedFeaturesError,
 };
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
@@ -365,16 +365,14 @@ unsafe fn switch_to_application(
     log::trace!("Top Level Page Table: {top_level_page_table:#X}");
     log::trace!("Stack Top: {stack_top:#X}");
     log::trace!("Entry Point: {entry_point:#X}");
+
     unsafe {
-        core::arch::asm!(
-            "cli",
-            "jmp {context_switch}",
-            context_switch = in(reg) context_switch,
-            in("rax") top_level_page_table,
-            in("rcx") stack_top,
-            in("rdx") entry_point,
-            in("rdi") response,
-            options(noreturn, nostack)
+        jump_to_context_switch(
+            context_switch,
+            top_level_page_table,
+            stack_top,
+            entry_point,
+            response,
         )
     }
 }
