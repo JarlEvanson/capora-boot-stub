@@ -18,8 +18,9 @@ use core::{
 
 use arch::x86_64::{
     create_architectural_structures, enable_required_features, jump_to_context_switch,
-    load_architecture_structures, test_required_feature_support, ArchitecturalStructures,
-    CreateArchitecturalStructuresError, UnsupportedFeaturesError,
+    load_architecture_structures, setup_context_switch, test_required_feature_support,
+    ArchitecturalStructures, CreateArchitecturalStructuresError, SetupContextSwitchError,
+    UnsupportedFeaturesError,
 };
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
@@ -106,8 +107,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
 
     test_required_feature_support()?;
 
-    let (response, response_virtual_address, stack, context_switch) =
-        setup_general_mappings(&mut application_map)?;
+    let (response, response_virtual_address, stack) = setup_general_mappings(&mut application_map)?;
 
     let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
         .unwrap()
@@ -140,6 +140,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
     );
 
     let architectural_structures = create_architectural_structures(&mut application_map)?;
+    let context_switch = setup_context_switch(&mut application_map)?;
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
     log::debug!("PML4E located at {top_level_page:#X}");
@@ -285,7 +286,9 @@ pub enum BootloaderError {
     /// An error occurred while setting up mappings.
     SetupMappingsError(SetupMappingsError),
     /// An error ocurred when creating architectural structures.
-    ArchitectureStructures(CreateArchitecturalStructuresError),
+    ArchitecturalStructuresError(CreateArchitecturalStructuresError),
+    /// An error ocurred when setting up context switch routine.
+    SetupContextSwitchError(SetupContextSwitchError),
 }
 
 impl From<UnsupportedFeaturesError> for BootloaderError {
@@ -314,7 +317,13 @@ impl From<SetupMappingsError> for BootloaderError {
 
 impl From<CreateArchitecturalStructuresError> for BootloaderError {
     fn from(value: CreateArchitecturalStructuresError) -> Self {
-        Self::ArchitectureStructures(value)
+        Self::ArchitecturalStructuresError(value)
+    }
+}
+
+impl From<SetupContextSwitchError> for BootloaderError {
+    fn from(value: SetupContextSwitchError) -> Self {
+        Self::SetupContextSwitchError(value)
     }
 }
 
@@ -334,8 +343,11 @@ impl fmt::Display for BootloaderError {
             Self::LoadApplicationError(error) => {
                 write!(f, "error while loading application: {error}")
             }
-            Self::ArchitectureStructures(error) => {
+            Self::ArchitecturalStructuresError(error) => {
                 write!(f, "error while creating architectural structures: {error}")
+            }
+            Self::SetupContextSwitchError(error) => {
+                write!(f, "error while setting up context switch routine: {error}")
             }
         }
     }
@@ -377,27 +389,17 @@ unsafe fn switch_to_application(
     }
 }
 
-const CONTEXT_STUB_BYTES: [u8; 13] = [
-    0x48, 0x31, 0xed, // xor rbp, rbp
-    0x0f, 0x22, 0xd8, // mov cr3, rax
-    0x48, 0x89, 0xcc, // mov rsp, rcx
-    0x6a, 0x00, // push 0x0
-    0xff, 0xe2, // jmp rdx
-];
-
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&'static mut BootloaderResponse, u64, u64, u64), SetupMappingsError> {
+) -> Result<(&'static mut BootloaderResponse, u64, u64), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
     let stack_virtual_address = stack.page_range().virtual_address();
     log::debug!("Stack allocated at {stack_virtual_address:#X}");
 
-    let miscellaneous_size = mem::size_of::<BootloaderResponse>()
-        + CONTEXT_STUB_BYTES.len()
-        + BOOTLOADER_NAME.len()
-        + BOOTLOADER_VERSION.len();
+    let miscellaneous_size =
+        mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len() + BOOTLOADER_VERSION.len();
 
     let miscellaneous_page_count = miscellaneous_size.div_ceil(4096);
     let miscellaneous_mapping = application_map.allocate_identity(
@@ -413,19 +415,13 @@ pub fn setup_general_mappings(
     let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
-            [..mem::size_of_val(&CONTEXT_STUB_BYTES)],
-        &CONTEXT_STUB_BYTES,
-    );
-    MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()
-            [mem::size_of::<BootloaderResponse>() + CONTEXT_STUB_BYTES.len()..]
             [..BOOTLOADER_NAME.len()],
         BOOTLOADER_NAME.as_bytes(),
     );
     MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()
-            + CONTEXT_STUB_BYTES.len()
-            + BOOTLOADER_NAME.len()..][..BOOTLOADER_VERSION.len()],
+        &mut miscellaneous_mapping.as_bytes_mut()
+            [mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len()..]
+            [..BOOTLOADER_VERSION.len()],
         BOOTLOADER_VERSION.as_bytes(),
     );
 
@@ -437,13 +433,11 @@ pub fn setup_general_mappings(
     };
     let bootloader_response = bootloader_response.write(BootloaderResponse {
         bootloader_name: (miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>() + CONTEXT_STUB_BYTES.len()) as u64)
-            as *const u8,
+            + (mem::size_of::<BootloaderResponse>()) as u64) as *const u8,
         bootloader_name_length: BOOTLOADER_NAME.len(),
         bootloader_version: (miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>()
-                + CONTEXT_STUB_BYTES.len()
-                + BOOTLOADER_NAME.len()) as u64) as *const u8,
+            + (mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len()) as u64)
+            as *const u8,
         bootloader_version_length: BOOTLOADER_VERSION.len(),
         kernel_virtual_address: ptr::null_mut(),
         memory_map_entries: ptr::null_mut(),
@@ -464,7 +458,6 @@ pub fn setup_general_mappings(
         bootloader_response,
         miscellaneous_virtual_address,
         stack_virtual_address,
-        miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
     ))
 }
 

@@ -131,6 +131,55 @@ impl fmt::Display for UnsupportedFeaturesError {
     }
 }
 
+core::arch::global_asm!(
+    "context_switch_start:",
+    "xor rbp, rbp",
+    "mov cr3, rax",
+    "mov rsp, rcx",
+    "push rbp",
+    "jmp rdx",
+    "context_switch_end:"
+);
+
+/// Allocates memory for the context switch and maps it into the application space.
+pub fn setup_context_switch(
+    application_map: &mut ApplicationMemoryMap,
+) -> Result<u64, SetupContextSwitchError> {
+    extern "C" {
+        #[link_name = "context_switch_start"]
+        static CONTEXT_SWITCH_START: core::ffi::c_void;
+        #[link_name = "context_switch_end"]
+        static CONTEXT_SWITCH_END: core::ffi::c_void;
+    }
+
+    let ptr = core::ptr::addr_of!(CONTEXT_SWITCH_START).cast::<u8>();
+    let size: usize = unsafe { core::ptr::addr_of!(CONTEXT_SWITCH_END).byte_offset_from(ptr) }
+        .try_into()
+        .unwrap();
+    let context_switch = unsafe { core::slice::from_raw_parts(ptr, size) };
+
+    let page_count = size.div_ceil(4096);
+
+    let allocation = application_map.allocate_identity(
+        page_count as u64,
+        Protection::Executable,
+        Usage::General,
+    );
+
+    MaybeUninit::copy_from_slice(&mut allocation.as_bytes_mut()[..size], context_switch);
+
+    Ok(allocation.page_range().virtual_address())
+}
+
+/// Various errors that can occur while setting up the context switch routine.
+pub enum SetupContextSwitchError {}
+
+impl fmt::Display for SetupContextSwitchError {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
 /// Jumps to the context switch for the application.
 ///
 /// # Safety
