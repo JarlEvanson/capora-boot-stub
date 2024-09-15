@@ -11,12 +11,14 @@
 #![feature(iter_map_windows)]
 
 use core::{
-    arch::x86_64,
-    error, fmt,
+    fmt,
     mem::{self, MaybeUninit},
     ptr,
 };
 
+use arch::x86_64::{
+    enable_required_features, test_required_feature_support, UnsupportedFeaturesError,
+};
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
 use load_application::{load_application, LoadApplicationError};
@@ -28,6 +30,7 @@ use uefi::{
     Status,
 };
 
+pub mod arch;
 pub mod configuration;
 pub mod load_application;
 pub mod logging;
@@ -91,7 +94,7 @@ fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
     let (slide, entry_point) = load_application(&mut application_map, application_bytes)?;
     log::debug!("Application loaded at {slide:#X}; Entry point at {entry_point:#X}");
 
-    test_required_bit_support()?;
+    test_required_feature_support()?;
 
     let (response, response_virtual_address, stack, gdt, context_switch) =
         setup_general_mappings(&mut application_map)?;
@@ -250,7 +253,7 @@ fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
     // TODO: Allocate UEFI memory map
 
     // Already checked that the required bits are supported.
-    let _ = set_required_bits();
+    let _ = enable_required_features();
     load_gdt(gdt);
 
     Ok((
@@ -350,53 +353,6 @@ unsafe fn switch_to_application(
     }
 }
 
-/// Checks if the required feature bits are supported.
-pub fn test_required_bit_support() -> Result<(), UnsupportedFeaturesError> {
-    let nxe_supported_bit = unsafe { x86_64::__cpuid(0x80000001).edx };
-    if !((nxe_supported_bit & (1 << 20)) == (1 << 20)) {
-        return Err(UnsupportedFeaturesError::NoExecuteEnable);
-    }
-
-    Ok(())
-}
-
-/// Sets bits required by the boot specification.
-pub fn set_required_bits() -> Result<(), UnsupportedFeaturesError> {
-    test_required_bit_support()?;
-
-    unsafe {
-        core::arch::asm!(
-            "mov ecx, 0xC0000080",
-            "rdmsr",
-            "or eax, 0x400",
-            "wrmsr",
-
-            // Enable write protection
-            "mov rax, cr0",
-            "or rax, 0x10000",
-            "mov cr0, rax",
-            out("eax") _,
-        )
-    }
-
-    Ok(())
-}
-
-/// Various unsupported features.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnsupportedFeaturesError {
-    /// The no-execute enable feature is not supported by this processor.
-    NoExecuteEnable,
-}
-
-impl fmt::Display for UnsupportedFeaturesError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoExecuteEnable => f.write_str("no execute enable bit is not supported"),
-        }
-    }
-}
-
 /// Loads the GDT mapped at `gdt`.
 ///
 /// This GDT should have a kernel code segment mapped at offset 0x8, and a kernel data segment
@@ -436,8 +392,6 @@ pub fn load_gdt(gdt: u64) {
         )
     }
 }
-
-impl error::Error for UnsupportedFeaturesError {}
 
 const CONTEXT_STUB_BYTES: [u8; 13] = [
     0x48, 0x31, 0xed, // xor rbp, rbp
