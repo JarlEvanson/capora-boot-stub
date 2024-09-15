@@ -7,6 +7,8 @@
 #![feature(maybe_uninit_write_slice)]
 #![feature(maybe_uninit_slice)]
 #![feature(const_slice_flatten)]
+#![feature(unsafe_cell_from_mut)]
+#![feature(iter_map_windows)]
 
 use core::{
     arch::x86_64,
@@ -30,6 +32,7 @@ pub mod configuration;
 pub mod load_application;
 pub mod logging;
 pub mod mapper;
+pub mod memory_map;
 pub mod memory_structs;
 pub mod paging;
 pub mod spinlock;
