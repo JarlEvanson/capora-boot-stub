@@ -17,7 +17,9 @@ use core::{
 };
 
 use arch::x86_64::{
-    enable_required_features, test_required_feature_support, UnsupportedFeaturesError,
+    create_architectural_structures, enable_required_features, load_architecture_structures,
+    test_required_feature_support, ArchitecturalStructures, CreateArchitecturalStructuresError,
+    UnsupportedFeaturesError,
 };
 use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEntry};
 use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
@@ -61,7 +63,14 @@ const LOADED_STACK_SIZE: u64 = 64 * 1024;
 
 #[uefi::entry]
 fn entry() -> Status {
-    let (context_switch, top_level_page_table, stack_top, entry_point, response) = match main() {
+    let (
+        architectural_structures,
+        context_switch,
+        top_level_page_table,
+        stack_top,
+        entry_point,
+        response,
+    ) = match main() {
         Ok(vars) => vars,
         Err(error) => {
             log::error!("{error}");
@@ -72,6 +81,7 @@ fn entry() -> Status {
 
     unsafe {
         switch_to_application(
+            architectural_structures,
             context_switch,
             top_level_page_table,
             stack_top,
@@ -81,7 +91,7 @@ fn entry() -> Status {
     }
 }
 
-fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
+fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), BootloaderError> {
     logging::init_logging();
 
     log::info!("Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}");
@@ -96,7 +106,7 @@ fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
 
     test_required_feature_support()?;
 
-    let (response, response_virtual_address, stack, gdt, context_switch) =
+    let (response, response_virtual_address, stack, context_switch) =
         setup_general_mappings(&mut application_map)?;
 
     let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
@@ -128,6 +138,8 @@ fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
             size: 0,
         },
     );
+
+    let architectural_structures = create_architectural_structures(&mut application_map)?;
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
     log::debug!("PML4E located at {top_level_page:#X}");
@@ -252,11 +264,8 @@ fn main() -> Result<(u64, u64, u64, u64, u64), BootloaderError> {
     // TODO: Search for RSDP pointer
     // TODO: Allocate UEFI memory map
 
-    // Already checked that the required bits are supported.
-    let _ = enable_required_features();
-    load_gdt(gdt);
-
     Ok((
+        architectural_structures,
         context_switch,
         top_level_page,
         stack + LOADED_STACK_SIZE,
@@ -275,6 +284,8 @@ pub enum BootloaderError {
     LoadApplicationError(LoadApplicationError),
     /// An error occurred while setting up mappings.
     SetupMappingsError(SetupMappingsError),
+    /// An error ocurred when creating architectural structures.
+    ArchitectureStructures(CreateArchitecturalStructuresError),
 }
 
 impl From<UnsupportedFeaturesError> for BootloaderError {
@@ -301,6 +312,12 @@ impl From<SetupMappingsError> for BootloaderError {
     }
 }
 
+impl From<CreateArchitecturalStructuresError> for BootloaderError {
+    fn from(value: CreateArchitecturalStructuresError) -> Self {
+        Self::ArchitectureStructures(value)
+    }
+}
+
 impl fmt::Display for BootloaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -317,6 +334,9 @@ impl fmt::Display for BootloaderError {
             Self::LoadApplicationError(error) => {
                 write!(f, "error while loading application: {error}")
             }
+            Self::ArchitectureStructures(error) => {
+                write!(f, "error while creating architectural structures: {error}")
+            }
         }
     }
 }
@@ -328,6 +348,7 @@ impl fmt::Display for BootloaderError {
 /// describing an address space that identity maps the context_switch, and `stack_top`,
 /// `entry_point`, and `response` must be properly setup when in the application address space.
 unsafe fn switch_to_application(
+    architectural_structures: ArchitecturalStructures,
     context_switch: u64,
     top_level_page_table: u64,
     stack_top: u64,
@@ -335,6 +356,11 @@ unsafe fn switch_to_application(
     response: u64,
 ) -> ! {
     log::info!("Switching to application");
+
+    // Already checked that required features are supported.
+    let _ = enable_required_features();
+    load_architecture_structures(architectural_structures);
+
     log::trace!("Context Switch: {context_switch:#X}");
     log::trace!("Top Level Page Table: {top_level_page_table:#X}");
     log::trace!("Stack Top: {stack_top:#X}");
@@ -353,46 +379,6 @@ unsafe fn switch_to_application(
     }
 }
 
-/// Loads the GDT mapped at `gdt`.
-///
-/// This GDT should have a kernel code segment mapped at offset 0x8, and a kernel data segment
-/// mapped at 0x10.
-#[inline(always)]
-pub fn load_gdt(gdt: u64) {
-    #[allow(dead_code)]
-    #[repr(C)]
-    struct Gdtr {
-        other: [MaybeUninit<u8>; 6],
-        size: u16,
-        offset: u64,
-    }
-
-    let gdtr = Gdtr {
-        other: [MaybeUninit::uninit(); 6],
-        size: (GDT.len() - 1) as u16,
-        offset: gdt,
-    };
-
-    unsafe {
-        core::arch::asm!(
-            "lgdt [rax]",
-            "push 0x08",
-            "lea rax, [rip + 5f]",
-            "push rax",
-            "retfq",
-            "5:",
-            "mov ax, 0x10",
-            "mov ds, ax",
-            "mov es, ax",
-            "mov es, ax",
-            "mov fs, ax",
-            "mov gs, ax",
-            "mov ss, ax",
-            inout("rax") &gdtr.size => _,
-        )
-    }
-}
-
 const CONTEXT_STUB_BYTES: [u8; 13] = [
     0x48, 0x31, 0xed, // xor rbp, rbp
     0x0f, 0x22, 0xd8, // mov cr3, rax
@@ -401,27 +387,16 @@ const CONTEXT_STUB_BYTES: [u8; 13] = [
     0xff, 0xe2, // jmp rdx
 ];
 
-const GDT: &[u8] = [
-    // Null GDT entry.
-    0x00_0_0_00_000000_0000u64.to_ne_bytes(),
-    // Kernel code entry.
-    0x00_A_F_9B_000000_FFFFu64.to_ne_bytes(),
-    // Kernel data entry.
-    0x00_C_F_93_000000_FFFFu64.to_ne_bytes(),
-]
-.as_flattened();
-
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&'static mut BootloaderResponse, u64, u64, u64, u64), SetupMappingsError> {
+) -> Result<(&'static mut BootloaderResponse, u64, u64, u64), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
     let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
     let stack_virtual_address = stack.page_range().virtual_address();
     log::debug!("Stack allocated at {stack_virtual_address:#X}");
 
     let miscellaneous_size = mem::size_of::<BootloaderResponse>()
-        + GDT.len()
         + CONTEXT_STUB_BYTES.len()
         + BOOTLOADER_NAME.len()
         + BOOTLOADER_VERSION.len();
@@ -440,24 +415,17 @@ pub fn setup_general_mappings(
     let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
-            [..GDT.len()],
-        GDT,
-    );
-    MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()
-            [mem::size_of::<BootloaderResponse>() + GDT.len()..]
             [..mem::size_of_val(&CONTEXT_STUB_BYTES)],
         &CONTEXT_STUB_BYTES,
     );
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()
-            [mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()..]
+            [mem::size_of::<BootloaderResponse>() + CONTEXT_STUB_BYTES.len()..]
             [..BOOTLOADER_NAME.len()],
         BOOTLOADER_NAME.as_bytes(),
     );
     MaybeUninit::copy_from_slice(
         &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()
-            + GDT.len()
             + CONTEXT_STUB_BYTES.len()
             + BOOTLOADER_NAME.len()..][..BOOTLOADER_VERSION.len()],
         BOOTLOADER_VERSION.as_bytes(),
@@ -471,12 +439,11 @@ pub fn setup_general_mappings(
     };
     let bootloader_response = bootloader_response.write(BootloaderResponse {
         bootloader_name: (miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>() + GDT.len() + CONTEXT_STUB_BYTES.len()) as u64)
+            + (mem::size_of::<BootloaderResponse>() + CONTEXT_STUB_BYTES.len()) as u64)
             as *const u8,
         bootloader_name_length: BOOTLOADER_NAME.len(),
         bootloader_version: (miscellaneous_virtual_address
             + (mem::size_of::<BootloaderResponse>()
-                + GDT.len()
                 + CONTEXT_STUB_BYTES.len()
                 + BOOTLOADER_NAME.len()) as u64) as *const u8,
         bootloader_version_length: BOOTLOADER_VERSION.len(),
@@ -500,7 +467,6 @@ pub fn setup_general_mappings(
         miscellaneous_virtual_address,
         stack_virtual_address,
         miscellaneous_virtual_address + mem::size_of::<BootloaderResponse>() as u64,
-        miscellaneous_virtual_address + (mem::size_of::<BootloaderResponse>() + GDT.len()) as u64,
     ))
 }
 
