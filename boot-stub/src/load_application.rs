@@ -228,7 +228,7 @@ pub fn load_application(
             let rela_type = info & 0xFFFF_FFFF;
             match rela_type {
                 8 => {
-                    log::debug!(
+                    log::trace!(
                         "Performing X86_64_RELATIVE relocation with offset {:#X} and addend: {:#X}",
                         offset,
                         addend,
