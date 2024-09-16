@@ -27,7 +27,7 @@ use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigu
 use load_application::{load_application, LoadApplicationError};
 use logging::setup_post_exit_logging;
 use memory_map::{AllocateEntryError, ApplicationMemoryMap, BackingMemory, Protection, Usage};
-use memory_structs::{Frame, FrameRange, PhysicalAddress, VirtualAddress};
+use memory_structs::{Frame, FrameRange, Page, PageRange, PhysicalAddress, VirtualAddress};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap, MemoryMapMut},
@@ -126,6 +126,35 @@ fn main() -> Result<
 
     let architectural_structures = create_architectural_structures(&mut application_map)?;
     let context_switch = setup_context_switch(&mut application_map)?;
+
+    let random_number = load_application::rand_u64().unwrap();
+    let start_address = VirtualAddress::new_canonical(
+        random_number as usize | (1 << (VirtualAddress::MAX_BITS - 1)),
+    );
+    let start_page = Page::containing_address(start_address);
+    let end_address =
+        VirtualAddress::new(start_page.base_address().value() + 4 * 1024 * 1024 * 1024 - 1)
+            .unwrap();
+    let end_page = Page::containing_address(end_address);
+    let pages = PageRange::inclusive_range(start_page, end_page).unwrap();
+
+    let start_frame = Frame::containing_address(PhysicalAddress::zero());
+    let end_frame =
+        Frame::containing_address(PhysicalAddress::new_masked(4 * 1024 * 1024 * 1024 - 1));
+    let frames = FrameRange::inclusive_range(start_frame, end_frame);
+
+    unsafe {
+        application_map
+            .add_entry(
+                pages,
+                BackingMemory::Unallocated {
+                    frame_range: frames,
+                    protection: Protection::WritableExecutable,
+                    usage: Usage::General,
+                },
+            )
+            .unwrap()
+    };
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
     log::debug!("PML4E located at {top_level_page:?}");
@@ -283,6 +312,7 @@ fn main() -> Result<
     let response = unsafe { response[0].assume_init_mut() };
 
     response.kernel_virtual_address = slide as *const core::ffi::c_void;
+    response.direct_map = start_address.value() as usize;
 
     response.memory_map_entries = bootloader_memory_map_address.value() as *mut MemoryMapEntry;
     response.memory_map_entry_count = filled_memory_map.len();
@@ -538,6 +568,7 @@ pub fn setup_general_mappings(
             + BOOTLOADER_NAME.len()) as *const u8,
         bootloader_version_length: BOOTLOADER_VERSION.len(),
         kernel_virtual_address: ptr::null_mut(),
+        direct_map: 0,
         memory_map_entries: ptr::null_mut(),
         memory_map_entry_count: 0,
         sm_bios_entry_32: ptr::null(),
