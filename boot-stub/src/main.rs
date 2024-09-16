@@ -463,36 +463,11 @@ pub fn setup_general_mappings(
 
 /// Various errors that can occur while allocating general page mappings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SetupMappingsError {
-    /// The allocation of stack frames failed.
-    StackAllocationFailed {
-        /// The number of frames that the allocation requested.
-        frame_count: u64,
-        /// The status code returned from the failed allocation.
-        status: Status,
-    },
-    /// The allocation of the gdt and context frames failed.
-    GdtContextSwitchAllocationFailed {
-        /// The status code returned from the failed allocation.
-        status: Status,
-    },
-}
+pub enum SetupMappingsError {}
 
 impl fmt::Display for SetupMappingsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StackAllocationFailed {
-                frame_count,
-                status,
-            } => write!(
-                f,
-                "allocation of {frame_count} pages for the stack failed with code {status}"
-            ),
-            Self::GdtContextSwitchAllocationFailed { status } => write!(
-                f,
-                "allocation of 1 page for GDT and context switch failed with code {status}"
-            ),
-        }
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
     }
 }
 
