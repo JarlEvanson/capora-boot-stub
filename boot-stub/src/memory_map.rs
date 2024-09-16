@@ -378,11 +378,17 @@ impl ApplicationMemoryMap {
 
     /// Returns an immutable slice over the [`Entry`]s that make up the [`ApplicationMemoryMap`].
     pub fn as_slice(&self) -> &[Entry] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+
         unsafe { core::slice::from_raw_parts(self.ptr, self.length) }
     }
 
     fn maybe_uninit_slice_mut(&mut self) -> &mut [MaybeUninit<Entry>] {
-        assert!(!self.ptr.is_null());
+        if self.ptr.is_null() {
+            return &mut [];
+        }
 
         unsafe {
             core::slice::from_raw_parts_mut(self.ptr.cast::<MaybeUninit<Entry>>(), self.length)
@@ -571,7 +577,7 @@ impl Entry {
                 protection: _,
                 usage: _,
             } => {
-                self.lock.lock();
+                self.lock.try_lock().expect("lock acquisition failed");
 
                 Some(Self::as_slice_impl(&self.lock, frame_range))
             }
