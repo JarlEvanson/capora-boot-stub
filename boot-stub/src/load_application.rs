@@ -17,7 +17,8 @@ use elf::{
 };
 
 use crate::{
-    mapper::{ApplicationMemoryMap, PageRange, Protection, Usage},
+    memory_map::{ApplicationMemoryMap, Protection, Usage},
+    memory_structs::{Page, PageRange, VirtualAddress},
     APPLICATION_REGION_SIZE, BASE_RETRY_COUNT, MINIMUM_APPLICATION_BASE,
 };
 
@@ -25,7 +26,7 @@ use crate::{
 pub fn load_application(
     application_map: &mut ApplicationMemoryMap,
     slice: &[u8],
-) -> Result<(u64, u64), LoadApplicationError> {
+) -> Result<(u64, VirtualAddress), LoadApplicationError> {
     let elf = elf::ElfFile::<Class64, LittleEndian>::parse(slice)?;
     let program_header_table = elf
         .program_header_table()
@@ -81,13 +82,16 @@ pub fn load_application(
             SegmentType(boot_api::BOOTLOADER_REQUEST_ELF_SEGMENT);
         match header.segment_type() {
             SegmentType::LOAD => {
-                let page_containing = header.virtual_address() / 4096;
-                let page_containing_end =
-                    (header.virtual_address() + header.memory_size()).div_ceil(4096);
-                let page_count = page_containing_end - page_containing;
-                let adjusted_page = (slide / 4096 + page_containing) & PageRange::PAGE_MASK;
-                let page_range =
-                    PageRange::new(adjusted_page, page_count).expect("bounds checking failed");
+                let start_address =
+                    VirtualAddress::new((slide + header.virtual_address()) as usize).unwrap();
+                let end_address = VirtualAddress::new(
+                    (slide + header.virtual_address() + header.memory_size()) as usize - 1,
+                )
+                .unwrap();
+
+                let start_page = Page::containing_address(start_address);
+                let end_page = Page::containing_address(end_address);
+                let page_range = PageRange::inclusive_range(start_page, end_page).unwrap();
 
                 let protection;
                 if (header.flags().0 & SegmentFlags::WRITE.0 == SegmentFlags::WRITE.0)
@@ -104,14 +108,17 @@ pub fn load_application(
 
                 let entry = application_map
                     .allocate_at(page_range, protection, Usage::Application)
-                    .ok_or(LoadApplicationError::OverlappingLoadSegments)?;
+                    .map_err(|_| LoadApplicationError::OverlappingLoadSegments)?;
                 log::debug!(
-                    "Loading segment at {:#X} with permissions: {protection:?}",
-                    entry.page_range().virtual_address()
+                    "Loading segment at {:?} with permissions: {protection:?}",
+                    entry.page_range().start_address()
                 );
 
+                let mut entry_bytes = entry
+                    .as_slice::<u8>()
+                    .expect("bug in application memory map");
                 MaybeUninit::copy_from_slice(
-                    &mut entry.as_bytes_mut()[..header.file_size() as usize],
+                    &mut entry_bytes[..header.file_size() as usize],
                     &slice[header.file_offset() as usize
                         ..(header.file_offset() + header.file_size()) as usize],
                 );
@@ -120,7 +127,7 @@ pub fn load_application(
                         "Filling segment segment with {} zero bytes",
                         header.memory_size() - header.file_size()
                     );
-                    MaybeUninit::fill(&mut entry.as_bytes_mut()[header.file_size() as usize..], 0);
+                    MaybeUninit::fill(&mut entry_bytes[header.file_size() as usize..], 0);
                 }
             }
             BOOTLOADER_REQUEST_SEGMENT_TYPE => {
@@ -198,29 +205,34 @@ pub fn load_application(
 
         for index in 0..num_entries {
             let memory_range = application_map
-                .lookup(slide + rela_offset)
+                .lookup(VirtualAddress::new((slide + rela_offset) as usize).unwrap())
                 .expect("rela table not loaded");
-            let loaded_range =
-                unsafe { MaybeUninit::slice_assume_init_ref(memory_range.as_bytes()) };
+            let loaded_range_lock = memory_range.as_slice::<u8>().unwrap();
+            let loaded_range = unsafe { MaybeUninit::slice_assume_init_ref(&loaded_range_lock) };
 
-            let range_offset = (slide + rela_offset) - memory_range.page_range().virtual_address();
+            let range_offset =
+                (slide + rela_offset) as usize - memory_range.page_range().start_address().value();
             let rela_slice = &loaded_range[range_offset as usize..];
             let rela = &rela_slice[(index * rela_entry_size) as usize..];
             let offset = u64::from_le_bytes(*rela.first_chunk::<8>().unwrap());
             let info = u64::from_le_bytes(*rela[8..].first_chunk::<8>().unwrap());
             let addend = i64::from_le_bytes(*rela[16..].first_chunk::<8>().unwrap());
+            drop(loaded_range_lock);
 
             let rela_type = info & 0xFFFF_FFFF;
             match rela_type {
                 8 => {
                     let value = slide.checked_add_signed(addend).unwrap();
-                    let address = slide.checked_add(offset).unwrap();
+                    let address = slide.checked_add(offset).unwrap() as usize;
 
-                    let memory_range = application_map.lookup_mut(address).unwrap();
-                    let frame_range_offset = address - memory_range.page_range().virtual_address();
-                    assert!(frame_range_offset + 8 <= memory_range.size() * 4096);
+                    let memory_range = application_map
+                        .lookup(VirtualAddress::new(address).unwrap())
+                        .unwrap();
+                    let frame_range_offset =
+                        address - memory_range.page_range().start_address().value();
+                    assert!(frame_range_offset + 8 <= memory_range.page_range().size_in_bytes());
 
-                    let relocation_place = &mut memory_range.as_bytes_mut()
+                    let relocation_place = &mut memory_range.as_slice().unwrap()
                         [frame_range_offset as usize..(frame_range_offset + 8) as usize];
 
                     MaybeUninit::copy_from_slice(relocation_place, &value.to_ne_bytes());
@@ -234,7 +246,10 @@ pub fn load_application(
         }
     }
 
-    Ok((slide, slide + elf.header().entry()))
+    Ok((
+        slide,
+        VirtualAddress::new((slide + elf.header().entry()) as usize).unwrap(),
+    ))
 }
 
 /// Various errors that can occur while loading an application.

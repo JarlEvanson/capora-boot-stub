@@ -2,7 +2,10 @@
 
 use core::{fmt, mem::MaybeUninit};
 
-use crate::mapper::{ApplicationMemoryMap, Protection, Usage};
+use crate::{
+    memory_map::{AllocateEntryError, ApplicationMemoryMap, Protection},
+    memory_structs::{PhysicalAddress, VirtualAddress},
+};
 
 const GDT: &[u8] = [
     // Null GDT entry.
@@ -18,25 +21,40 @@ const GDT: &[u8] = [
 pub fn create_architectural_structures(
     application_map: &mut ApplicationMemoryMap,
 ) -> Result<ArchitecturalStructures, CreateArchitecturalStructuresError> {
-    let allocation = application_map.allocate_identity(
-        GDT.len().div_ceil(4096) as u64,
-        Protection::Readable,
-        Usage::General,
-    );
-    MaybeUninit::copy_from_slice(&mut allocation.as_bytes_mut()[..GDT.len()], GDT);
+    let allocation =
+        application_map.allocate_identity(GDT.len().div_ceil(4096), Protection::Readable)?;
+
+    let mut allocated_bytes = allocation
+        .as_slice()
+        .expect("bug in application memory map");
+    MaybeUninit::copy_from_slice(&mut allocated_bytes[..GDT.len()], GDT);
 
     Ok(ArchitecturalStructures {
-        gdt: allocation.page_range().virtual_address(),
+        gdt: allocation.page_range().start_address(),
     })
 }
 
 /// Various errors that can occur while creating architectural structures.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum CreateArchitecturalStructuresError {}
+pub enum CreateArchitecturalStructuresError {
+    /// An error occurred while allocating an [`Entry`] for architectural structures.
+    AllocationError(AllocateEntryError),
+}
+
+impl From<AllocateEntryError> for CreateArchitecturalStructuresError {
+    fn from(value: AllocateEntryError) -> Self {
+        Self::AllocationError(value)
+    }
+}
 
 impl fmt::Display for CreateArchitecturalStructuresError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AllocationError(error) => write!(
+                f,
+                "error while allocating memory for architectural structures: {error}"
+            ),
+        }
     }
 }
 
@@ -53,7 +71,7 @@ pub fn load_architecture_structures(data: ArchitecturalStructures) {
     let gdtr = Gdtr {
         other: [MaybeUninit::uninit(); 6],
         size: (GDT.len() - 1) as u16,
-        offset: data.gdt,
+        offset: data.gdt.value() as u64,
     };
 
     unsafe {
@@ -80,7 +98,7 @@ pub fn load_architecture_structures(data: ArchitecturalStructures) {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct ArchitecturalStructures {
     /// The virtual address of the global descriptor table.
-    gdt: u64,
+    gdt: VirtualAddress,
 }
 
 /// Checks if the required features are supported.
@@ -144,7 +162,7 @@ core::arch::global_asm!(
 /// Allocates memory for the context switch and maps it into the application space.
 pub fn setup_context_switch(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<u64, SetupContextSwitchError> {
+) -> Result<VirtualAddress, SetupContextSwitchError> {
     extern "C" {
         #[link_name = "context_switch_start"]
         static CONTEXT_SWITCH_START: core::ffi::c_void;
@@ -159,20 +177,27 @@ pub fn setup_context_switch(
     let context_switch = unsafe { core::slice::from_raw_parts(ptr, size) };
 
     let page_count = size.div_ceil(4096);
+    let allocation = application_map.allocate_identity(page_count, Protection::Executable)?;
 
-    let allocation = application_map.allocate_identity(
-        page_count as u64,
-        Protection::Executable,
-        Usage::General,
-    );
+    let mut allocated_bytes = allocation
+        .as_slice()
+        .expect("bug in application memory map");
+    MaybeUninit::copy_from_slice(&mut allocated_bytes[..size], context_switch);
 
-    MaybeUninit::copy_from_slice(&mut allocation.as_bytes_mut()[..size], context_switch);
-
-    Ok(allocation.page_range().virtual_address())
+    Ok(allocation.page_range().start_address())
 }
 
 /// Various errors that can occur while setting up the context switch routine.
-pub enum SetupContextSwitchError {}
+pub enum SetupContextSwitchError {
+    /// An error occurred while allocating an [`Entry`] for the context switch routine.
+    AllocationError(AllocateEntryError),
+}
+
+impl From<AllocateEntryError> for SetupContextSwitchError {
+    fn from(value: AllocateEntryError) -> Self {
+        Self::AllocationError(value)
+    }
+}
 
 impl fmt::Display for SetupContextSwitchError {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -191,21 +216,21 @@ impl fmt::Display for SetupContextSwitchError {
 /// - `entry_point` must point to the entry point of the application.
 /// - `bootloader_response` must be the virtual address of the bootloader response.
 pub unsafe fn jump_to_context_switch(
-    context_switch: u64,
-    top_level_page_table: u64,
-    stack_top: u64,
-    entry_point: u64,
-    bootloader_response: u64,
+    context_switch: VirtualAddress,
+    top_level_page_table: PhysicalAddress,
+    stack_top: VirtualAddress,
+    entry_point: VirtualAddress,
+    bootloader_response: VirtualAddress,
 ) -> ! {
     unsafe {
         core::arch::asm!(
             "cli",
             "jmp {context_switch}",
-            context_switch = in(reg) context_switch,
-            in("rax") top_level_page_table,
-            in("rcx") stack_top,
-            in("rdx") entry_point,
-            in("rdi") bootloader_response,
+            context_switch = in(reg) context_switch.value(),
+            in("rax") top_level_page_table.value(),
+            in("rcx") stack_top.value(),
+            in("rdx") entry_point.value(),
+            in("rdi") bootloader_response.value(),
             options(noreturn, nostack)
         )
     }

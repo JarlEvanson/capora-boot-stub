@@ -26,7 +26,8 @@ use boot_api::{BootloaderResponse, MemoryMapEntry, MemoryMapEntryKind, ModuleEnt
 use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigurationError};
 use load_application::{load_application, LoadApplicationError};
 use logging::setup_post_exit_logging;
-use mapper::{ApplicationMemoryMap, FrameRange, PageRange, Protection, Usage};
+use memory_map::{AllocateEntryError, ApplicationMemoryMap, BackingMemory, Protection, Usage};
+use memory_structs::{Frame, FrameRange, PhysicalAddress, VirtualAddress};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap, MemoryMapMut},
@@ -37,7 +38,6 @@ pub mod arch;
 pub mod configuration;
 pub mod load_application;
 pub mod logging;
-pub mod mapper;
 pub mod memory_map;
 pub mod memory_structs;
 pub mod paging;
@@ -60,7 +60,7 @@ const APPLICATION_REGION_SIZE: u64 = 0x0000000080000000;
 /// The maximum number of retries for finding a elf base before giving up.
 const BASE_RETRY_COUNT: u64 = 1000;
 /// The size of the stack for the loaded application.
-const LOADED_STACK_SIZE: u64 = 64 * 1024;
+const LOADED_STACK_SIZE: usize = 64 * 1024;
 
 #[uefi::entry]
 fn entry() -> Status {
@@ -92,7 +92,17 @@ fn entry() -> Status {
     }
 }
 
-fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), BootloaderError> {
+fn main() -> Result<
+    (
+        ArchitecturalStructures,
+        VirtualAddress,
+        PhysicalAddress,
+        VirtualAddress,
+        VirtualAddress,
+        VirtualAddress,
+    ),
+    BootloaderError,
+> {
     logging::init_logging();
 
     log::info!("Booting {BOOTLOADER_NAME} {BOOTLOADER_VERSION}");
@@ -103,41 +113,22 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
     log::info!("Loaded {application_name}");
 
     let (slide, entry_point) = load_application(&mut application_map, application_bytes)?;
-    log::debug!("Application loaded at {slide:#X}; Entry point at {entry_point:#X}");
+    log::debug!("Application loaded at {slide:#X}; Entry point at {entry_point:?}");
 
     test_required_feature_support()?;
 
-    let (response, response_virtual_address, stack) = setup_general_mappings(&mut application_map)?;
+    let (response_virtual_address, stack) = setup_general_mappings(&mut application_map)?;
 
     let (bootloader_memory_map_address, uefi_memory_map_address) =
         allocate_memory_map_regions(&mut application_map)?;
-
-    let memory_map_region = application_map
-        .lookup_mut(bootloader_memory_map_address)
-        .unwrap();
-    let memory_map_region = unsafe {
-        core::slice::from_raw_parts_mut(
-            memory_map_region
-                .as_bytes_mut()
-                .as_mut_ptr()
-                .cast::<MaybeUninit<MemoryMapEntry>>(),
-            memory_map_region.as_bytes_mut().len() / mem::size_of::<MemoryMapEntry>(),
-        )
-    };
-    let memory_map_region = MaybeUninit::fill(
-        memory_map_region,
-        MemoryMapEntry {
-            kind: MemoryMapEntryKind::RESERVED,
-            base: 0,
-            size: 0,
-        },
-    );
+    log::debug!("Allocated bootloader memory map at {bootloader_memory_map_address:?}");
+    log::debug!("Allocated uefi memory map at {uefi_memory_map_address:?}");
 
     let architectural_structures = create_architectural_structures(&mut application_map)?;
     let context_switch = setup_context_switch(&mut application_map)?;
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
-    log::debug!("PML4E located at {top_level_page:#X}");
+    log::debug!("PML4E located at {top_level_page:?}");
 
     log::info!("Exiting boot services");
     setup_post_exit_logging();
@@ -149,6 +140,25 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
     for entry in application_memory_entries {
         log::trace!("{entry:X?}");
     }
+
+    let bootloader_memory_map_entry = application_memory_entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .page_range()
+                .contains_address(bootloader_memory_map_address)
+        })
+        .next()
+        .unwrap();
+    let mut bootloader_memory_map = bootloader_memory_map_entry.as_slice().unwrap();
+    let bootloader_memory_map = MaybeUninit::fill(
+        &mut bootloader_memory_map,
+        MemoryMapEntry {
+            kind: MemoryMapEntryKind::RESERVED,
+            base: 0,
+            size: 0,
+        },
+    );
 
     let mut index = 0;
     let mut base = 0;
@@ -178,50 +188,68 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
         while size != 0 {
             let entry = 'bootloader_test: {
                 if kind == MemoryMapEntryKind::BOOTLOADER {
-                    let frame_range = FrameRange::new(base / 4096, size / 4096).unwrap();
+                    let start_address = PhysicalAddress::new(base).unwrap();
+                    let end_address = PhysicalAddress::new((size - 1) / 4096).unwrap();
 
-                    let Some(min_key) = application_memory_entries
+                    let start_frame = Frame::containing_address(start_address);
+                    let end_frame = Frame::containing_address(end_address);
+
+                    let frames = FrameRange::inclusive_range(start_frame, end_frame);
+
+                    let Some((frame_range, usage)) = application_memory_entries
                         .iter()
-                        .filter(|entry| {
-                            entry.frame_range().overlaps(frame_range)
-                                && entry.usage() != Usage::General
+                        .filter_map(|entry| match entry.backing() {
+                            BackingMemory::Allocated {
+                                frame_range,
+                                protection: _,
+                                usage,
+                            }
+                            | BackingMemory::Unallocated {
+                                frame_range,
+                                protection: _,
+                                usage,
+                            } if frame_range.overlaps(&frames) && usage != Usage::General => {
+                                Some((frame_range, usage))
+                            }
+                            _ => None,
                         })
-                        .min_by_key(|e| e.frame())
+                        .min_by_key(|(frame_range, _)| frame_range.start().number())
                     else {
                         break 'bootloader_test MemoryMapEntry { kind, base, size };
                     };
 
-                    let start_overlap = core::cmp::max(frame_range.frame(), min_key.frame());
+                    let start_overlap = core::cmp::max(frames.start(), frame_range.start());
                     let end_overlap = core::cmp::min(
-                        frame_range.frame() + frame_range.size(),
-                        min_key.frame() + min_key.size(),
+                        frames.start().number() + frames.size_in_frames(),
+                        frame_range.start().number() + frame_range.size_in_frames(),
                     );
 
-                    if base / 4096 < start_overlap {
+                    if start_frame < start_overlap {
                         break 'bootloader_test MemoryMapEntry {
                             kind,
                             base,
-                            size: (start_overlap - base / 4096) * 4096,
+                            size: frames.size_in_frames(),
                         };
                     }
 
-                    let kind = match min_key.usage() {
+                    let kind = match usage {
                         Usage::General => MemoryMapEntryKind::BOOTLOADER,
                         Usage::Application => MemoryMapEntryKind::KERNEL,
                         Usage::Module => MemoryMapEntryKind::MODULE,
+                        Usage::Framebuffer => MemoryMapEntryKind::RESERVED,
                     };
 
                     break 'bootloader_test MemoryMapEntry {
                         kind,
                         base,
-                        size: (end_overlap - start_overlap) * 4096,
+                        size: (end_overlap - start_overlap.number()) * 4096,
                     };
                 }
 
                 MemoryMapEntry { kind, base, size }
             };
 
-            memory_map_region[index] = entry;
+            bootloader_memory_map[index] = entry;
 
             size -= entry.size;
             base += entry.size;
@@ -234,7 +262,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
         kind = entry_kind;
     }
 
-    let filled_memory_map = &mut memory_map_region[..index];
+    let filled_memory_map = &mut bootloader_memory_map[..index];
 
     for entry in filled_memory_map.iter() {
         log::trace!("{entry:X?}");
@@ -242,9 +270,21 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
 
     mem::forget(memory_map);
 
+    let response = application_memory_entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .page_range()
+                .contains_address(response_virtual_address)
+        })
+        .next()
+        .unwrap();
+    let mut response = response.as_slice::<BootloaderResponse>().unwrap();
+    let response = unsafe { response[0].assume_init_mut() };
+
     response.kernel_virtual_address = slide as *const core::ffi::c_void;
 
-    response.memory_map_entries = bootloader_memory_map_address as *mut MemoryMapEntry;
+    response.memory_map_entries = bootloader_memory_map_address.value() as *mut MemoryMapEntry;
     response.memory_map_entry_count = filled_memory_map.len();
 
     response.uefi_system_table_ptr = uefi::table::system_table_raw()
@@ -252,7 +292,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
         .unwrap_or(ptr::null_mut())
         .cast::<core::ffi::c_void>();
 
-    response.module_entries = modules_virt_address as *mut ModuleEntry;
+    response.module_entries = modules_virt_address.value() as *mut ModuleEntry;
     response.module_entry_count = module_count as usize;
 
     // TODO: Search for SM BIOS entries
@@ -263,7 +303,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
         architectural_structures,
         context_switch,
         top_level_page,
-        stack + LOADED_STACK_SIZE,
+        stack,
         entry_point,
         response_virtual_address,
     ))
@@ -367,11 +407,11 @@ impl fmt::Display for BootloaderError {
 /// `entry_point`, and `response` must be properly setup when in the application address space.
 unsafe fn switch_to_application(
     architectural_structures: ArchitecturalStructures,
-    context_switch: u64,
-    top_level_page_table: u64,
-    stack_top: u64,
-    entry_point: u64,
-    response: u64,
+    context_switch: VirtualAddress,
+    top_level_page_table: PhysicalAddress,
+    stack_top: VirtualAddress,
+    entry_point: VirtualAddress,
+    response: VirtualAddress,
 ) -> ! {
     log::info!("Switching to application");
 
@@ -379,10 +419,10 @@ unsafe fn switch_to_application(
     let _ = enable_required_features();
     load_architecture_structures(architectural_structures);
 
-    log::trace!("Context Switch: {context_switch:#X}");
-    log::trace!("Top Level Page Table: {top_level_page_table:#X}");
-    log::trace!("Stack Top: {stack_top:#X}");
-    log::trace!("Entry Point: {entry_point:#X}");
+    log::trace!("Context Switch: {context_switch:?}");
+    log::trace!("Top Level Page Table: {top_level_page_table:?}");
+    log::trace!("Stack Top: {stack_top:?}");
+    log::trace!("Entry Point: {entry_point:?}");
 
     unsafe {
         jump_to_context_switch(
@@ -399,7 +439,7 @@ unsafe fn switch_to_application(
 /// obtained when exiting boot services.
 pub fn allocate_memory_map_regions(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(u64, u64), AllocateMemoryMapRegionsError> {
+) -> Result<(VirtualAddress, VirtualAddress), AllocateMemoryMapRegionsError> {
     let memory_map = boot::memory_map(boot::MemoryType::LOADER_DATA).unwrap();
 
     let bootloader_memory_map_size = memory_map
@@ -408,85 +448,94 @@ pub fn allocate_memory_map_regions(
         .saturating_mul(mem::size_of::<MemoryMapEntry>());
     let bootloader_memory_map_page_count = bootloader_memory_map_size.div_ceil(4096);
     let bootloader_memory_map = application_map.allocate(
-        bootloader_memory_map_page_count as u64,
+        bootloader_memory_map_page_count,
         Protection::Readable,
         Usage::General,
-    );
-    let bootloader_memory_map_address = bootloader_memory_map.page_range().virtual_address();
+    )?;
+    let bootloader_memory_map_address = bootloader_memory_map.page_range().start_address();
 
     let uefi_memory_map_size = memory_map
         .len()
         .saturating_mul(2)
         .saturating_mul(memory_map.meta().desc_size);
     let uefi_memory_map_page_count = uefi_memory_map_size.div_ceil(4096);
-    let uefi_memory_map_ = application_map.allocate(
-        uefi_memory_map_page_count as u64,
+    let uefi_memory_map = application_map.allocate(
+        uefi_memory_map_page_count,
         Protection::Readable,
         Usage::General,
-    );
-    let uefi_memory_map_address = uefi_memory_map_.page_range().virtual_address();
+    )?;
+    let uefi_memory_map_address = uefi_memory_map.page_range().start_address();
 
     Ok((bootloader_memory_map_address, uefi_memory_map_address))
 }
 
 /// Various errors that can occur while allocating memory map regions.
-pub enum AllocateMemoryMapRegionsError {}
+pub struct AllocateMemoryMapRegionsError(AllocateEntryError);
+
+impl From<AllocateEntryError> for AllocateMemoryMapRegionsError {
+    fn from(value: AllocateEntryError) -> Self {
+        Self(value)
+    }
+}
 
 impl fmt::Display for AllocateMemoryMapRegionsError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "error while allocating memory for memory maps: {}",
+            self.0
+        )
     }
 }
 
 /// Allocates and configures various mappings necessary to successfully boot.
 pub fn setup_general_mappings(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&'static mut BootloaderResponse, u64, u64), SetupMappingsError> {
+) -> Result<(VirtualAddress, VirtualAddress), SetupMappingsError> {
     let stack_frame_count = LOADED_STACK_SIZE.div_ceil(4096);
-    let stack = application_map.allocate(stack_frame_count, Protection::Writable, Usage::General);
-    let stack_virtual_address = stack.page_range().virtual_address();
-    log::debug!("Stack allocated at {stack_virtual_address:#X}");
+    let stack = application_map
+        .allocate(stack_frame_count, Protection::Writable, Usage::General)
+        .map_err(SetupMappingsError::StackAllocationError)?;
+    let stack_virtual_address =
+        VirtualAddress::new(stack.page_range().start_address().value() + LOADED_STACK_SIZE)
+            .unwrap();
+    log::debug!("Stack allocated at {stack_virtual_address:?}");
 
-    let miscellaneous_size =
+    let bootloader_response_size =
         mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len() + BOOTLOADER_VERSION.len();
+    let bootloader_response_page_count = bootloader_response_size.div_ceil(4096);
+    let bootloader_response_mapping = application_map
+        .allocate(
+            bootloader_response_page_count,
+            Protection::Executable,
+            Usage::General,
+        )
+        .map_err(SetupMappingsError::BootloaderResponseAllocationError)?;
+    let bootloader_response_address = bootloader_response_mapping.page_range().start_address();
+    log::debug!("Miscellaneous mapping allocated at {bootloader_response_address:?}");
 
-    let miscellaneous_page_count = miscellaneous_size.div_ceil(4096);
-    let miscellaneous_mapping = application_map.allocate_identity(
-        miscellaneous_page_count as u64,
-        Protection::Executable,
-        Usage::General,
-    );
-    log::debug!(
-        "Miscellaneous mapping allocated at {:#X}",
-        miscellaneous_mapping.page_range().virtual_address()
-    );
-
-    let miscellaneous_virtual_address = miscellaneous_mapping.page_range().virtual_address();
+    let mut bootloader_strings_slice = bootloader_response_mapping.as_slice().unwrap();
     MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()[mem::size_of::<BootloaderResponse>()..]
+        &mut bootloader_strings_slice[mem::size_of::<BootloaderResponse>()..]
             [..BOOTLOADER_NAME.len()],
         BOOTLOADER_NAME.as_bytes(),
     );
     MaybeUninit::copy_from_slice(
-        &mut miscellaneous_mapping.as_bytes_mut()
+        &mut bootloader_strings_slice
             [mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len()..]
             [..BOOTLOADER_VERSION.len()],
         BOOTLOADER_VERSION.as_bytes(),
     );
+    drop(bootloader_strings_slice);
 
-    let bootloader_response = unsafe {
-        &mut *miscellaneous_mapping
-            .as_bytes_mut()
-            .as_mut_ptr()
-            .cast::<MaybeUninit<BootloaderResponse>>()
-    };
-    let bootloader_response = bootloader_response.write(BootloaderResponse {
-        bootloader_name: (miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>()) as u64) as *const u8,
+    let bootloader_response = &mut bootloader_response_mapping.as_slice().unwrap()[0];
+    bootloader_response.write(BootloaderResponse {
+        bootloader_name: (bootloader_response_address.value()
+            + mem::size_of::<BootloaderResponse>()) as *const u8,
         bootloader_name_length: BOOTLOADER_NAME.len(),
-        bootloader_version: (miscellaneous_virtual_address
-            + (mem::size_of::<BootloaderResponse>() + BOOTLOADER_NAME.len()) as u64)
-            as *const u8,
+        bootloader_version: (bootloader_response_address.value()
+            + mem::size_of::<BootloaderResponse>()
+            + BOOTLOADER_NAME.len()) as *const u8,
         bootloader_version_length: BOOTLOADER_VERSION.len(),
         kernel_virtual_address: ptr::null_mut(),
         memory_map_entries: ptr::null_mut(),
@@ -503,16 +552,17 @@ pub fn setup_general_mappings(
         module_entry_count: 0,
     });
 
-    Ok((
-        bootloader_response,
-        miscellaneous_virtual_address,
-        stack_virtual_address,
-    ))
+    Ok((bootloader_response_address, stack_virtual_address))
 }
 
 /// Various errors that can occur while allocating general page mappings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SetupMappingsError {}
+pub enum SetupMappingsError {
+    /// An error occurred while allocating memory for the application stack.
+    StackAllocationError(AllocateEntryError),
+    /// An error occurred while allocating memory for the bootloader response.
+    BootloaderResponseAllocationError(AllocateEntryError),
+}
 
 impl fmt::Display for SetupMappingsError {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {

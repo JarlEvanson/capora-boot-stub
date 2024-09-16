@@ -2,11 +2,14 @@
 
 use core::mem::{self, MaybeUninit};
 
-use crate::mapper::{ApplicationMemoryMap, Entry};
+use crate::{
+    memory_map::{ApplicationMemoryMap, BackingMemory, Entry},
+    memory_structs::PhysicalAddress,
+};
 
 /// Creates and allocates a full page table layout for the provided [`ApplicationMemoryMap`], returning
 /// the physical memory address to be loaded into the address space specifier.
-pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
+pub fn map_app(map: ApplicationMemoryMap) -> (PhysicalAddress, &'static [Entry]) {
     let mut pml4e_index = 512;
     let mut pml3e_index = 512;
     let mut pml2e_index = 512;
@@ -14,9 +17,8 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
     let mut page_count = 1;
 
     for entry in map.as_slice().iter().filter(|entry| entry.present()) {
-        let mut page = entry.page();
-        while entry.page_range().contains(page) {
-            let pml4e = get_pml4e_page_index(page);
+        for page in entry.page_range() {
+            let pml4e = get_pml4e_page_index(page.number());
             if pml4e != pml4e_index {
                 pml4e_index = pml4e;
                 page_count += 1;
@@ -24,20 +26,18 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
                 pml3e_index = 512;
                 pml2e_index = 512;
             }
-            let pml3e = get_pml3e_page_index(page);
+            let pml3e = get_pml3e_page_index(page.number());
             if pml3e != pml3e_index {
                 pml3e_index = pml3e;
                 page_count += 1;
 
                 pml2e_index = 512;
             }
-            let pml2e = get_pml2e_page_index(page);
+            let pml2e = get_pml2e_page_index(page.number());
             if pml2e != pml2e_index {
                 pml2e_index = pml2e;
                 page_count += 1;
             }
-
-            page = page.wrapping_add(1);
         }
     }
 
@@ -66,12 +66,24 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
     pml2e_index = 512;
     let mut pml1e_table = &mut [0; 512];
 
-    for entry in map.as_slice().iter().filter(|entry| entry.present()) {
-        let mut page = entry.page();
-        let mut frame = entry.frame();
+    for entry in map.as_slice().iter() {
+        let frame_range = match entry.backing() {
+            BackingMemory::Allocated {
+                frame_range,
+                protection: _,
+                usage: _,
+            }
+            | BackingMemory::Unallocated {
+                frame_range,
+                protection: _,
+                usage: _,
+            } => frame_range,
 
-        while entry.page_range().contains(page) {
-            let pml4e = get_pml4e_page_index(page);
+            BackingMemory::Unbacked => continue,
+        };
+
+        for (page, frame) in entry.page_range().into_iter().zip(frame_range.into_iter()) {
+            let pml4e = get_pml4e_page_index(page.number());
             if pml4e != pml4e_index {
                 pml3e_table = page_tables.next().unwrap();
                 pml4e_index = pml4e;
@@ -81,7 +93,7 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
                 pml3e_index = 512;
                 pml2e_index = 512
             }
-            let pml3e = get_pml3e_page_index(page);
+            let pml3e = get_pml3e_page_index(page.number());
             if pml3e != pml3e_index {
                 pml2e_table = page_tables.next().unwrap();
                 pml3e_index = pml3e;
@@ -90,7 +102,7 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
 
                 pml2e_index = 512;
             }
-            let pml2e = get_pml2e_page_index(page);
+            let pml2e = get_pml2e_page_index(page.number());
             if pml2e != pml2e_index {
                 pml1e_table = page_tables.next().unwrap();
                 pml2e_index = pml2e;
@@ -98,53 +110,53 @@ pub fn map_app(map: ApplicationMemoryMap) -> (u64, &'static [Entry]) {
                 pml2e_table[pml2e_index as usize] = 1 | (1 << 1) | (pml1e_table.as_ptr() as u64);
             }
 
-            pml1e_table[get_pml1e_page_index(page) as usize] = 1
+            pml1e_table[get_pml1e_page_index(page.number()) as usize] = 1
                 | ((entry.writable() as u64) << 1)
-                | (frame << 12)
+                | frame.base_address().value()
                 | ((!entry.executable() as u64) << 63);
-
-            page = page.wrapping_add(1);
-            frame = frame.wrapping_add(1);
         }
     }
 
     let entries = unsafe { core::mem::transmute::<&[Entry], &'static [Entry]>(map.as_slice()) };
 
-    (pml4e_table.as_ptr() as u64, entries)
+    (
+        PhysicalAddress::new(pml4e_table.as_ptr() as u64).unwrap(),
+        entries,
+    )
 }
 
-fn get_pml1e_page_index(page: u64) -> u16 {
+fn get_pml1e_page_index(page: usize) -> u16 {
     (page & 0x1FF) as u16
 }
 
-fn get_pml2e_page_index(page: u64) -> u16 {
+fn get_pml2e_page_index(page: usize) -> u16 {
     ((page >> 9) & 0x1FF) as u16
 }
 
-fn get_pml3e_page_index(page: u64) -> u16 {
+fn get_pml3e_page_index(page: usize) -> u16 {
     ((page >> 18) & 0x1FF) as u16
 }
 
-fn get_pml4e_page_index(page: u64) -> u16 {
+fn get_pml4e_page_index(page: usize) -> u16 {
     ((page >> 27) & 0x1FF) as u16
 }
 
 /// Gets the index into the page map level 1 table.
-pub fn get_pml1e_index(address: u64) -> u16 {
+pub fn get_pml1e_index(address: usize) -> u16 {
     ((address >> 12) & 0x1FF) as u16
 }
 
 /// Gets the index into the page map level 2 table.
-pub fn get_pml2e_index(address: u64) -> u16 {
+pub fn get_pml2e_index(address: usize) -> u16 {
     ((address >> 21) & 0x1FF) as u16
 }
 
 /// Gets the index into the page map level 3 table.
-pub fn get_pml3e_index(address: u64) -> u16 {
+pub fn get_pml3e_index(address: usize) -> u16 {
     ((address >> 30) & 0x1FF) as u16
 }
 
 /// Gets the index into the page map level 4 table.
-pub fn get_pml4e_index(address: u64) -> u16 {
+pub fn get_pml4e_index(address: usize) -> u16 {
     ((address >> 39) & 0x1FF) as u16
 }

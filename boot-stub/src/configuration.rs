@@ -3,7 +3,6 @@
 use core::{
     error, fmt,
     mem::{self, MaybeUninit},
-    ptr,
     str::Utf8Error,
 };
 
@@ -18,12 +17,16 @@ use uefi::{
     Status,
 };
 
-use crate::mapper::{ApplicationMemoryMap, Protection, Usage};
+use crate::{
+    memory_map::{AllocateEntryError, ApplicationMemoryMap, Protection, Usage},
+    memory_structs::VirtualAddress,
+};
 
 /// Acquires, parses, and interprets the [`Configuration`].
 pub fn parse_and_interprete_configuration(
     application_map: &mut ApplicationMemoryMap,
-) -> Result<(&'static str, &'static [u8], u64, u64), ParseAndInterpretConfigurationError> {
+) -> Result<(&'static str, &'static [u8], VirtualAddress, u64), ParseAndInterpretConfigurationError>
+{
     let (config_section, embedded_section) = get_sections()?;
 
     // Acquire the [`Configuration`].
@@ -79,7 +82,12 @@ pub fn parse_and_interprete_configuration(
 
     let module_count = configuration.entry_count() - 1;
     if module_count == 0 {
-        return Ok((application_name, application_bytes, 0, module_count));
+        return Ok((
+            application_name,
+            application_bytes,
+            VirtualAddress::zero(),
+            module_count,
+        ));
     }
 
     let mut total_name_size = 0;
@@ -92,42 +100,24 @@ pub fn parse_and_interprete_configuration(
 
         total_name_size += length as usize;
     }
+    let names_entry = application_map
+        .allocate(
+            total_name_size.div_ceil(4096),
+            Protection::Readable,
+            Usage::General,
+        )
+        .map_err(ParseAndInterpretConfigurationError::AllocateModuleNamesError)?;
+    let names_address = names_entry.page_range().start_address();
+
     let total_module_entry_size = module_count as usize * mem::size_of::<boot_api::ModuleEntry>();
-    let total_size = total_module_entry_size + total_name_size;
-
-    let module_memory_entry = application_map.allocate(
-        total_size.div_ceil(4096) as u64,
-        Protection::Writable,
-        Usage::General,
-    );
-    let module_virtual_address = module_memory_entry.page_range().virtual_address();
-
-    let (module_entry_slice, string_slice) = {
-        let module_memory_slice =
-            unsafe { &mut *(module_memory_entry.as_bytes_mut() as *mut [MaybeUninit<u8>]) };
-        let (module_entry_slice, string_slice) =
-            module_memory_slice.split_at_mut(total_module_entry_size);
-
-        let module_entry_slice = unsafe {
-            let slice = core::slice::from_raw_parts_mut(
-                module_entry_slice
-                    .as_mut_ptr()
-                    .cast::<MaybeUninit<boot_api::ModuleEntry>>(),
-                module_count as usize,
-            );
-            MaybeUninit::fill(
-                slice,
-                boot_api::ModuleEntry {
-                    name: ptr::null(),
-                    name_length: 0,
-                    address: ptr::null(),
-                    size: 0,
-                },
-            )
-        };
-
-        (module_entry_slice, MaybeUninit::fill(string_slice, 0))
-    };
+    let module_entries_entry = application_map
+        .allocate(
+            total_module_entry_size.div_ceil(4096),
+            Protection::Readable,
+            Usage::General,
+        )
+        .map_err(ParseAndInterpretConfigurationError::AllocateModuleEntriesError)?;
+    let module_entries_address = module_entries_entry.page_range().start_address();
 
     let mut string_index = 0;
     for (index, entry) in entries.enumerate() {
@@ -137,36 +127,54 @@ pub fn parse_and_interprete_configuration(
             )?;
         let module_page_count = module_size.div_ceil(4096);
 
-        let memory_entry = application_map.allocate(
-            module_page_count as u64,
-            Protection::Writable,
-            Usage::Module,
-        );
+        let module_memory_entry =
+            application_map
+                .allocate(module_page_count, Protection::Writable, Usage::Module)
+                .map_err(|error| {
+                    ParseAndInterpretConfigurationError::AllocateModuleMemoryError { index, error }
+                })?;
         log::debug!(
-            "Module {module_name} loaded at {:#X}",
-            memory_entry.page_range().virtual_address()
+            "Module {module_name} loaded at {:?}",
+            module_memory_entry.page_range().start_address()
         );
-        load_entry(embedded_section, memory_entry.as_bytes_mut(), module_data).map_err(
-            |error| ParseAndInterpretConfigurationError::LoadEntryError { index, error },
-        )?;
+        load_entry(
+            embedded_section,
+            &mut module_memory_entry
+                .as_slice()
+                .expect("bug in application memory map"),
+            module_data,
+        )
+        .map_err(|error| ParseAndInterpretConfigurationError::LoadEntryError { index, error })?;
 
         let loaded_entry = boot_api::ModuleEntry {
-            name: (module_virtual_address + (total_module_entry_size + string_index) as u64)
-                as *const u8,
+            name: (names_address.value() + string_index) as *const u8,
             name_length: module_name.len(),
-            address: memory_entry.page_range().virtual_address() as *const u8,
+            address: module_memory_entry.page_range().start_address().value() as *const u8,
             size: module_size,
         };
-        module_entry_slice[index] = loaded_entry;
+        let mut module_entry_slice = application_map
+            .lookup(module_entries_address)
+            .expect("bug in application_memory map")
+            .as_slice()
+            .expect("bug in application memory map");
+        module_entry_slice[index].write(loaded_entry);
 
-        string_slice[string_index..][..module_name.len()].copy_from_slice(module_name.as_bytes());
+        let mut string_slice = application_map
+            .lookup(names_address)
+            .expect("bug in application memory map")
+            .as_slice()
+            .expect("bug in application memory map");
+        MaybeUninit::copy_from_slice(
+            &mut string_slice[string_index..][..module_name.len()],
+            module_name.as_bytes(),
+        );
         string_index += module_name.len();
     }
 
     Ok((
         application_name,
         application_bytes,
-        module_virtual_address,
+        module_entries_address,
         module_count,
     ))
 }
@@ -192,6 +200,17 @@ pub enum ParseAndInterpretConfigurationError {
     MissingApplicationEntry,
     /// An error occurrred while loading the application data.
     LoadApplicationError(LoadEntryError),
+    /// An error occurred while allocating memory for module names.
+    AllocateModuleNamesError(AllocateEntryError),
+    /// An error occurred while allocating memory for module entries.
+    AllocateModuleEntriesError(AllocateEntryError),
+    /// An error occurred while allocating memory for a module.
+    AllocateModuleMemoryError {
+        /// The index of the module.
+        index: usize,
+        /// The error that occurred.
+        error: AllocateEntryError,
+    },
     /// An error occurred while loading an entry.
     LoadEntryError {
         /// The index of the [`Entry`] whose loading failed.
@@ -227,6 +246,18 @@ impl fmt::Display for ParseAndInterpretConfigurationError {
             ),
             Self::MissingApplicationEntry => write!(f, "missing entry for application"),
             Self::LoadApplicationError(error) => write!(f, "error loading application: {error}"),
+            Self::AllocateModuleNamesError(error) => write!(
+                f,
+                "error allocating virtual memory region for module names: {error}"
+            ),
+            Self::AllocateModuleEntriesError(error) => write!(
+                f,
+                "error allocating virtual memory region for module entries: {error}"
+            ),
+            Self::AllocateModuleMemoryError { index, error } => write!(
+                f,
+                "error allocating virtual memory region for module {index}: {error}",
+            ),
             Self::LoadEntryError { index, error } => {
                 write!(f, "error loadeding entry {index}: {error}")
             }
