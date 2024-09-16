@@ -202,6 +202,7 @@ pub fn load_application(
 
         let num_entries = rela_size / rela_entry_size;
         log::debug!("Performing {num_entries} relocations specified at offset {rela_offset:#X}");
+        log::trace!("Relocation entry size: {rela_entry_size}");
 
         for index in 0..num_entries {
             let memory_range = application_map
