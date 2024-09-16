@@ -555,6 +555,11 @@ impl Entry {
         }
     }
 
+    /// Returns the [`BackingMemory`] of this [`Entry`].
+    pub fn backing(&self) -> BackingMemory {
+        self.backing
+    }
+
     /// Returns a [`SpinlockGuard`] reference to the bytes backing the virtual memory allocation.
     ///
     /// If [`BackingMemory`] is not [`BackingMemory::Allocated`], then this function returns
