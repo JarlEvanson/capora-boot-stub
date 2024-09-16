@@ -222,6 +222,11 @@ pub fn load_application(
             let rela_type = info & 0xFFFF_FFFF;
             match rela_type {
                 8 => {
+                    log::debug!(
+                        "Performing X86_64_RELATIVE relocation with offset {:#X} and addend: {:#X}",
+                        offset,
+                        addend,
+                    );
                     let value = slide.checked_add_signed(addend).unwrap();
                     let address = slide.checked_add(offset).unwrap() as usize;
 
@@ -238,6 +243,10 @@ pub fn load_application(
                     MaybeUninit::copy_from_slice(relocation_place, &value.to_ne_bytes());
                 }
                 relocation_type => {
+                    log::error!(
+                        "Error performing relocation {index}: unsupported relocation type \
+                        {rela_type} with offset {offset:#X} and addend {addend:#X}",
+                    );
                     return Err(LoadApplicationError::UnsupportedRelocationType(
                         relocation_type,
                     ));
