@@ -28,15 +28,11 @@ use configuration::{parse_and_interprete_configuration, ParseAndInterpretConfigu
 use load_application::{load_application, LoadApplicationError};
 use logging::setup_post_exit_logging;
 use memory_map::{AllocateEntryError, ApplicationMemoryMap, BackingMemory, Protection, Usage};
-use memory_structs::{Frame, FrameRange, Page, PageRange, PhysicalAddress, VirtualAddress};
+use memory_structs::{Frame, FrameRange, PhysicalAddress, VirtualAddress};
 use uefi::{
     boot,
     mem::memory_map::{MemoryMap, MemoryMapMut},
     Status,
-};
-use x86_64::{
-    structures::{gdt::SegmentSelector, idt::InterruptDescriptorTable},
-    VirtAddr,
 };
 
 pub mod arch;
@@ -131,110 +127,6 @@ fn main() -> Result<
 
     let architectural_structures = create_architectural_structures(&mut application_map)?;
     let context_switch = setup_context_switch(&mut application_map)?;
-
-    let idt_virtual_address = {
-        const HANDLER_BYTES: &[u8] = include_bytes!("handler.bin");
-        const FONT_BYTES: &[u8] = concat_bytes!(
-            include_bytes!("../assets/0.bin"),
-            include_bytes!("../assets/1.bin"),
-            include_bytes!("../assets/2.bin"),
-            include_bytes!("../assets/3.bin"),
-            include_bytes!("../assets/4.bin"),
-            include_bytes!("../assets/5.bin"),
-            include_bytes!("../assets/6.bin"),
-            include_bytes!("../assets/7.bin"),
-            include_bytes!("../assets/8.bin"),
-            include_bytes!("../assets/9.bin"),
-            include_bytes!("../assets/A.bin"),
-            include_bytes!("../assets/B.bin"),
-            include_bytes!("../assets/C.bin"),
-            include_bytes!("../assets/D.bin"),
-            include_bytes!("../assets/E.bin"),
-            include_bytes!("../assets/F.bin"),
-        );
-
-        let handler_entry = application_map
-            .allocate_identity(
-                (HANDLER_BYTES.len() + 24 + FONT_BYTES.len()).div_ceil(4096),
-                Protection::Executable,
-            )
-            .unwrap();
-        let handler_virtual_address = handler_entry.page_range().start_address();
-        log::debug!("Handler page allocated at {handler_virtual_address:?}");
-        MaybeUninit::copy_from_slice(
-            &mut handler_entry.as_slice().unwrap()[..HANDLER_BYTES.len()],
-            HANDLER_BYTES,
-        );
-        let ptr = logging::PTR.load(core::sync::atomic::Ordering::Acquire);
-        let size = logging::BUFFER.load(core::sync::atomic::Ordering::Acquire);
-        let stride = logging::STRIDE.load(core::sync::atomic::Ordering::Acquire);
-        MaybeUninit::copy_from_slice(
-            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len()..][..8],
-            &ptr.to_ne_bytes(),
-        );
-        MaybeUninit::copy_from_slice(
-            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 8..][..8],
-            &(size / 4).to_ne_bytes(),
-        );
-        MaybeUninit::copy_from_slice(
-            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 16..][..8],
-            &stride.to_ne_bytes(),
-        );
-        MaybeUninit::copy_from_slice(
-            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 24..][..FONT_BYTES.len()],
-            FONT_BYTES,
-        );
-
-        let start_virtual_address =
-            Page::containing_address(VirtualAddress::new_canonical(ptr as usize));
-        let end_virtual_address =
-            Page::containing_address(VirtualAddress::new_canonical(ptr as usize + size as usize));
-        let pages = PageRange::inclusive_range(start_virtual_address, end_virtual_address).unwrap();
-
-        let start_physical_address = Frame::containing_address(PhysicalAddress::new_masked(ptr));
-        let end_physical_address =
-            Frame::containing_address(PhysicalAddress::new_masked(ptr + size));
-        let frames = FrameRange::inclusive_range(start_physical_address, end_physical_address);
-
-        let framebuffer_entry = unsafe {
-            application_map
-                .add_entry(
-                    pages,
-                    BackingMemory::Unallocated {
-                        frame_range: frames,
-                        protection: Protection::Writable,
-                        usage: Usage::Framebuffer,
-                    },
-                )
-                .unwrap()
-        };
-        log::debug!(
-            "Framebuffer entry: {:?}",
-            framebuffer_entry.page_range().start_address()
-        );
-
-        let idt_entry = application_map
-            .allocate_identity(1, Protection::Writable)
-            .unwrap();
-        let idt_virtual_address = idt_entry.page_range().start_address();
-        log::debug!("IDT page allocated at {idt_virtual_address:?}");
-        let mut idt_lock = idt_entry.as_slice().unwrap();
-        let idt = &mut idt_lock[0];
-
-        let mut idt_table = InterruptDescriptorTable::new();
-        let options = unsafe {
-            idt_table
-                .page_fault
-                .set_handler_addr(VirtAddr::new(handler_virtual_address.value() as u64))
-        };
-        unsafe {
-            options.set_code_selector(SegmentSelector::new(1, x86_64::PrivilegeLevel::Ring0))
-        };
-        unsafe { options.set_stack_index(0) };
-        idt.write(idt_table);
-
-        idt_virtual_address
-    };
 
     let (top_level_page, application_memory_entries) = paging::map_app(application_map);
     log::debug!("PML4E located at {top_level_page:?}");
@@ -407,17 +299,6 @@ fn main() -> Result<
     // TODO: Search for SM BIOS entries
     // TODO: Search for RSDP pointer
     // TODO: Allocate UEFI memory map
-
-    let idt_entry = application_memory_entries
-        .iter()
-        .filter(|entry| entry.page_range().contains_address(idt_virtual_address))
-        .next()
-        .unwrap();
-    unsafe {
-        idt_entry.as_slice::<InterruptDescriptorTable>().unwrap()[0]
-            .assume_init_mut()
-            .load_unsafe();
-    }
 
     Ok((
         architectural_structures,

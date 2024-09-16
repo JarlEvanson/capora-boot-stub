@@ -1,11 +1,39 @@
 //! Code for the `x86_64` bootloader.
 
-use core::{fmt, mem::MaybeUninit};
+use core::{
+    fmt,
+    mem::{self, MaybeUninit},
+};
+
+use x86_64::{
+    structures::{gdt::SegmentSelector, idt::InterruptDescriptorTable},
+    VirtAddr,
+};
 
 use crate::{
-    memory_map::{AllocateEntryError, ApplicationMemoryMap, Protection},
-    memory_structs::{PhysicalAddress, VirtualAddress},
+    memory_map::{AllocateEntryError, ApplicationMemoryMap, BackingMemory, Protection, Usage},
+    memory_structs::{Frame, FrameRange, Page, PageRange, PhysicalAddress, VirtualAddress},
 };
+
+const HANDLER_BYTES: &[u8] = include_bytes!("../../handler.bin");
+const FONT_BYTES: &[u8] = concat_bytes!(
+    include_bytes!("../../../assets/0.bin"),
+    include_bytes!("../../../assets/1.bin"),
+    include_bytes!("../../../assets/2.bin"),
+    include_bytes!("../../../assets/3.bin"),
+    include_bytes!("../../../assets/4.bin"),
+    include_bytes!("../../../assets/5.bin"),
+    include_bytes!("../../../assets/6.bin"),
+    include_bytes!("../../../assets/7.bin"),
+    include_bytes!("../../../assets/8.bin"),
+    include_bytes!("../../../assets/9.bin"),
+    include_bytes!("../../../assets/A.bin"),
+    include_bytes!("../../../assets/B.bin"),
+    include_bytes!("../../../assets/C.bin"),
+    include_bytes!("../../../assets/D.bin"),
+    include_bytes!("../../../assets/E.bin"),
+    include_bytes!("../../../assets/F.bin"),
+);
 
 const GDT: &[u8] = [
     // Null GDT entry.
@@ -24,6 +52,88 @@ const GDT: &[u8] = [
 pub fn create_architectural_structures(
     application_map: &mut ApplicationMemoryMap,
 ) -> Result<ArchitecturalStructures, CreateArchitecturalStructuresError> {
+    let idt_virtual_address = {
+        let handler_entry = application_map.allocate_identity(
+            (HANDLER_BYTES.len() + 24 + FONT_BYTES.len()).div_ceil(4096),
+            Protection::Executable,
+        )?;
+        let handler_virtual_address = handler_entry.page_range().start_address();
+        log::debug!("Handler page allocated at {handler_virtual_address:?}");
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[..HANDLER_BYTES.len()],
+            HANDLER_BYTES,
+        );
+        let ptr = crate::logging::PTR.load(core::sync::atomic::Ordering::Acquire);
+        let size = crate::logging::BUFFER.load(core::sync::atomic::Ordering::Acquire);
+        let stride = crate::logging::STRIDE.load(core::sync::atomic::Ordering::Acquire);
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len()..][..8],
+            &ptr.to_ne_bytes(),
+        );
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 8..][..8],
+            &(size / 4).to_ne_bytes(),
+        );
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 16..][..8],
+            &stride.to_ne_bytes(),
+        );
+        MaybeUninit::copy_from_slice(
+            &mut handler_entry.as_slice().unwrap()[HANDLER_BYTES.len() + 24..][..FONT_BYTES.len()],
+            FONT_BYTES,
+        );
+
+        let start_virtual_address =
+            Page::containing_address(VirtualAddress::new_canonical(ptr as usize));
+        let end_virtual_address =
+            Page::containing_address(VirtualAddress::new_canonical(ptr as usize + size as usize));
+        let pages = PageRange::inclusive_range(start_virtual_address, end_virtual_address).unwrap();
+
+        let start_physical_address = Frame::containing_address(PhysicalAddress::new_masked(ptr));
+        let end_physical_address =
+            Frame::containing_address(PhysicalAddress::new_masked(ptr + size));
+        let frames = FrameRange::inclusive_range(start_physical_address, end_physical_address);
+
+        let framebuffer_entry = unsafe {
+            application_map
+                .add_entry(
+                    pages,
+                    BackingMemory::Unallocated {
+                        frame_range: frames,
+                        protection: Protection::Writable,
+                        usage: Usage::Framebuffer,
+                    },
+                )
+                .unwrap()
+        };
+        log::debug!(
+            "Framebuffer entry: {:?}",
+            framebuffer_entry.page_range().start_address()
+        );
+
+        let idt_entry = application_map
+            .allocate_identity(1, Protection::Writable)
+            .unwrap();
+        let idt_virtual_address = idt_entry.page_range().start_address();
+        log::debug!("IDT page allocated at {idt_virtual_address:?}");
+        let mut idt_lock = idt_entry.as_slice().unwrap();
+        let idt = &mut idt_lock[0];
+
+        let mut idt_table = InterruptDescriptorTable::new();
+        let options = unsafe {
+            idt_table
+                .page_fault
+                .set_handler_addr(VirtAddr::new(handler_virtual_address.value() as u64))
+        };
+        unsafe {
+            options.set_code_selector(SegmentSelector::new(1, x86_64::PrivilegeLevel::Ring0))
+        };
+        unsafe { options.set_stack_index(0) };
+        idt.write(idt_table);
+
+        idt_virtual_address
+    };
+
     let interrupt_stack_entry = application_map.allocate_identity(1, Protection::Writable)?;
     let interrupt_stack_address = interrupt_stack_entry.page_range().start_address();
     log::debug!("Interrupt stack allocated at {interrupt_stack_address:?}");
@@ -108,6 +218,7 @@ pub fn create_architectural_structures(
 
     Ok(ArchitecturalStructures {
         gdt: allocation.page_range().start_address(),
+        idt: idt_virtual_address,
     })
 }
 
@@ -171,6 +282,27 @@ pub fn load_architecture_structures(data: ArchitecturalStructures) {
             inout("rax") &gdtr.size => _,
         )
     }
+
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct Idtr {
+        other: [MaybeUninit<u8>; 6],
+        size: u16,
+        offset: u64,
+    }
+
+    let idtr = Idtr {
+        other: [MaybeUninit::uninit(); 6],
+        size: (mem::size_of::<InterruptDescriptorTable>() - 1) as u16,
+        offset: data.idt.value() as u64,
+    };
+
+    unsafe {
+        core::arch::asm!(
+            "lidt [rax]",
+            in("rax") &idtr.size,
+        )
+    }
 }
 
 /// Data needed to set the architectural structures to be used.
@@ -178,6 +310,8 @@ pub fn load_architecture_structures(data: ArchitecturalStructures) {
 pub struct ArchitecturalStructures {
     /// The virtual address of the global descriptor table.
     gdt: VirtualAddress,
+    /// The virtual address of the interrupt descriptor table.
+    idt: VirtualAddress,
 }
 
 /// Checks if the required features are supported.
