@@ -118,7 +118,8 @@ pub fn load_application(
                     .as_slice::<u8>()
                     .expect("bug in application memory map");
                 MaybeUninit::copy_from_slice(
-                    &mut entry_bytes[..header.file_size() as usize],
+                    &mut entry_bytes[start_address.page_offset()
+                        ..(start_address.page_offset() + header.file_size() as usize)],
                     &slice[header.file_offset() as usize
                         ..(header.file_offset() + header.file_size()) as usize],
                 );
@@ -127,7 +128,11 @@ pub fn load_application(
                         "Filling segment segment with {} zero bytes",
                         header.memory_size() - header.file_size()
                     );
-                    MaybeUninit::fill(&mut entry_bytes[header.file_size() as usize..], 0);
+                    MaybeUninit::fill(
+                        &mut entry_bytes
+                            [(start_address.page_offset() + header.file_size() as usize)..],
+                        0,
+                    );
                 }
             }
             BOOTLOADER_REQUEST_SEGMENT_TYPE => {
