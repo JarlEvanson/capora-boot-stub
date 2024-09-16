@@ -160,6 +160,42 @@ impl FrameRange {
     }
 }
 
+impl IntoIterator for FrameRange {
+    type Item = Frame;
+    type IntoIter = FrameRangeIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        FrameRangeIter {
+            frame: self.frame,
+            remaining: self.size,
+        }
+    }
+}
+
+/// An [`Iterator`] over the [`Frame`]s that make up the [`FrameRange`].
+pub struct FrameRangeIter {
+    frame: Frame,
+    remaining: u64,
+}
+
+impl Iterator for FrameRangeIter {
+    type Item = Frame;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let frame = self.frame;
+        self.frame = Frame::containing_address(PhysicalAddress::new_masked(
+            self.frame.base_address().value() + Frame::FRAME_SIZE,
+        ));
+
+        self.remaining -= 1;
+        Some(frame)
+    }
+}
+
 /// A virtual memory address.
 #[repr(transparent)]
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -327,5 +363,41 @@ impl PageRange {
     pub const fn overlaps(&self, other: &PageRange) -> bool {
         self.start().number() < other.start().number() + other.size_in_pages()
             && other.start().number() < self.start().number() + self.size_in_pages()
+    }
+}
+
+impl IntoIterator for PageRange {
+    type Item = Page;
+    type IntoIter = PageRangeIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PageRangeIter {
+            page: self.page,
+            remaining: self.size,
+        }
+    }
+}
+
+/// An [`Iterator`] over the [`Page`]s that make up the [`PageRange`].
+pub struct PageRangeIter {
+    page: Page,
+    remaining: usize,
+}
+
+impl Iterator for PageRangeIter {
+    type Item = Page;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let page = self.page;
+        self.page = Page::containing_address(VirtualAddress::new_canonical(
+            self.page.base_address().value() + Page::PAGE_SIZE,
+        ));
+
+        self.remaining -= 1;
+        Some(page)
     }
 }
