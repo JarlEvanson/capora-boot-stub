@@ -109,25 +109,19 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
 
     let (response, response_virtual_address, stack) = setup_general_mappings(&mut application_map)?;
 
-    let memory_map_region_size = boot::memory_map(boot::MemoryType::LOADER_DATA)
-        .unwrap()
-        .len()
-        * 2
-        * mem::size_of::<MemoryMapEntry>();
-    let memory_map_region_page_count = memory_map_region_size.div_ceil(4096) as u64;
-    let memory_map_region = application_map.allocate(
-        memory_map_region_page_count,
-        Protection::Writable,
-        Usage::General,
-    );
-    let memory_map_virtual_address = memory_map_region.page_range().virtual_address();
+    let (bootloader_memory_map_address, uefi_memory_map_address) =
+        allocate_memory_map_regions(&mut application_map)?;
+
+    let memory_map_region = application_map
+        .lookup_mut(bootloader_memory_map_address)
+        .unwrap();
     let memory_map_region = unsafe {
         core::slice::from_raw_parts_mut(
             memory_map_region
                 .as_bytes_mut()
                 .as_mut_ptr()
                 .cast::<MaybeUninit<MemoryMapEntry>>(),
-            memory_map_region_size / mem::size_of::<MemoryMapEntry>(),
+            memory_map_region.as_bytes_mut().len() / mem::size_of::<MemoryMapEntry>(),
         )
     };
     let memory_map_region = MaybeUninit::fill(
@@ -250,7 +244,7 @@ fn main() -> Result<(ArchitecturalStructures, u64, u64, u64, u64, u64), Bootload
 
     response.kernel_virtual_address = slide as *const core::ffi::c_void;
 
-    response.memory_map_entries = memory_map_virtual_address as *mut MemoryMapEntry;
+    response.memory_map_entries = bootloader_memory_map_address as *mut MemoryMapEntry;
     response.memory_map_entry_count = filled_memory_map.len();
 
     response.uefi_system_table_ptr = uefi::table::system_table_raw()
@@ -285,6 +279,8 @@ pub enum BootloaderError {
     LoadApplicationError(LoadApplicationError),
     /// An error occurred while setting up mappings.
     SetupMappingsError(SetupMappingsError),
+    /// An error occurred when allocating virtual memory regions for the memory maps.
+    AllocateMemoryMapRegionsError(AllocateMemoryMapRegionsError),
     /// An error ocurred when creating architectural structures.
     ArchitecturalStructuresError(CreateArchitecturalStructuresError),
     /// An error ocurred when setting up context switch routine.
@@ -312,6 +308,12 @@ impl From<LoadApplicationError> for BootloaderError {
 impl From<SetupMappingsError> for BootloaderError {
     fn from(value: SetupMappingsError) -> Self {
         Self::SetupMappingsError(value)
+    }
+}
+
+impl From<AllocateMemoryMapRegionsError> for BootloaderError {
+    fn from(value: AllocateMemoryMapRegionsError) -> Self {
+        Self::AllocateMemoryMapRegionsError(value)
     }
 }
 
@@ -343,6 +345,10 @@ impl fmt::Display for BootloaderError {
             Self::LoadApplicationError(error) => {
                 write!(f, "error while loading application: {error}")
             }
+            Self::AllocateMemoryMapRegionsError(error) => write!(
+                f,
+                "error occurred while allocating memory for memory maps: {error}",
+            ),
             Self::ArchitecturalStructuresError(error) => {
                 write!(f, "error while creating architectural structures: {error}")
             }
@@ -386,6 +392,49 @@ unsafe fn switch_to_application(
             entry_point,
             response,
         )
+    }
+}
+
+/// Allocates virtual memory regions to store the bootloader memory map and the UEFI memory map
+/// obtained when exiting boot services.
+pub fn allocate_memory_map_regions(
+    application_map: &mut ApplicationMemoryMap,
+) -> Result<(u64, u64), AllocateMemoryMapRegionsError> {
+    let memory_map = boot::memory_map(boot::MemoryType::LOADER_DATA).unwrap();
+
+    let bootloader_memory_map_size = memory_map
+        .len()
+        .saturating_mul(2)
+        .saturating_mul(mem::size_of::<MemoryMapEntry>());
+    let bootloader_memory_map_page_count = bootloader_memory_map_size.div_ceil(4096);
+    let bootloader_memory_map = application_map.allocate(
+        bootloader_memory_map_page_count as u64,
+        Protection::Readable,
+        Usage::General,
+    );
+    let bootloader_memory_map_address = bootloader_memory_map.page_range().virtual_address();
+
+    let uefi_memory_map_size = memory_map
+        .len()
+        .saturating_mul(2)
+        .saturating_mul(memory_map.meta().desc_size);
+    let uefi_memory_map_page_count = uefi_memory_map_size.div_ceil(4096);
+    let uefi_memory_map_ = application_map.allocate(
+        uefi_memory_map_page_count as u64,
+        Protection::Readable,
+        Usage::General,
+    );
+    let uefi_memory_map_address = uefi_memory_map_.page_range().virtual_address();
+
+    Ok((bootloader_memory_map_address, uefi_memory_map_address))
+}
+
+/// Various errors that can occur while allocating memory map regions.
+pub enum AllocateMemoryMapRegionsError {}
+
+impl fmt::Display for AllocateMemoryMapRegionsError {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
     }
 }
 
